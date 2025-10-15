@@ -6,7 +6,7 @@ import subprocess
 
 TABLE_NAME = "dwd_idc_life_ent_soc_public_sentiment_battery_work_mix_rt"
 
-# 数据库连接参数
+# 数据库连接信息
 conn = pymysql.connect(
     host="da-dw-tidb-10900.chj.cloud",
     port=3306,
@@ -18,10 +18,10 @@ conn = pymysql.connect(
 )
 
 cursor = conn.cursor()
-
 last_id = 0
 
 print(f"开始监测 TiDB 表 {TABLE_NAME}，Ctrl+C 可退出...")
+
 try:
     while True:
         sql = f"SELECT * FROM {TABLE_NAME} WHERE id > %s ORDER BY id ASC"
@@ -30,17 +30,19 @@ try:
 
         if rows:
             for row in rows:
-                print("检测到新数据:", row)
+                print("🔍 检测到新数据:", row)
 
-                # 直接调用 feishu_notify.py 脚本，并传入 JSON 字符串
+                # 转换成 JSON 字符串（所有类型都转成可序列化）
+                row_json_str = json.dumps(row, ensure_ascii=False, default=str)
+
+                # 调用 feishu_notify.py 发送到飞书
                 try:
-                    row_json_str = json.dumps(row, ensure_ascii=False)
                     subprocess.run(["python3", "feishu_notify.py", row_json_str])
                 except Exception as e:
-                    print(f"❌ 调用 feishu 通知脚本失败: {e}")
+                    print(f"❌ 调用飞书通知脚本失败: {e}")
 
                 # 更新 last_id
-                if row['id'] > last_id:
+                if row.get('id', 0) > last_id:
                     last_id = row['id']
 
         time.sleep(3)
