@@ -30,12 +30,13 @@ try:
 
         if rows:
             for row in rows:
-                print("🔍 检测到新数据:", row)
+                # 只打印 work_id 到控制台
+                print(f"🔍 检测到新数据，work_id: {row.get('work_id', '')}")
 
                 # 转换成 JSON 字符串（所有类型都转成可序列化）
                 row_json_str = json.dumps(row, ensure_ascii=False, default=str)
 
-                # 调用 feishu_notify.py 发送到飞书
+                # 调用 feishu_notify.py 发送到飞书（保持不变）
                 try:
                     subprocess.run(["python3", "feishu_notify.py", row_json_str])
                 except Exception as e:
