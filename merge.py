@@ -4,7 +4,6 @@ import requests
 import json
 import datetime
 import base64
-import sys
 import time
 import pymysql
 
@@ -111,6 +110,7 @@ def send_to_feishu(data: dict):
 
 # ================== TiDB 监控配置与逻辑 ==================
 TABLE_NAME = "dwd_idc_life_ent_soc_public_sentiment_battery_work_mix_rt"
+POLL_INTERVAL_SEC = 3
 
 DB_CONFIG = {
     "host": "da-dw-tidb-10900.chj.cloud",
@@ -149,7 +149,7 @@ def monitor_tidb():
                     if rid > last_id:
                         last_id = rid
 
-            time.sleep(3)
+            time.sleep(POLL_INTERVAL_SEC)
 
     except KeyboardInterrupt:
         print("监测程序已退出")
@@ -164,42 +164,6 @@ def monitor_tidb():
         except Exception:
             pass
 
-# ================== 主入口 ==================
+# ================== 主入口（仅持续监控 TiDB 并推送，无示例数据） ==================
 if __name__ == "__main__":
-    # 使用方式：
-    # 1) 监控 TiDB 并推送：python3 monitor_and_notify.py monitor
-    # 2) 直接推送命令行传入的 JSON：python3 monitor_and_notify.py '<JSON字符串>'
-    # 3) 无参数时，使用示例数据进行测试推送
-    if len(sys.argv) >= 2:
-        if sys.argv[1].lower() == "monitor":
-            monitor_tidb()
-        else:
-            try:
-                row_json_str = sys.argv[1]
-                data = json.loads(row_json_str)
-                send_to_feishu(data)
-            except Exception as e:
-                print(f"❌ 解析输入 JSON 失败: {e}")
-                sys.exit(1)
-    else:
-        # 示例测试数据（仅无参数时使用）
-        test_data = {
-            "id": 186,
-            "work_id": "315bd20e7e7690e27f2859689ac4ba04",
-            "work_url": "www.baidu.com",
-            "work_title": "提醒各位北方的电车小伙伴要注意冬季电池规划新能源冬天真是消耗大..." * 5,
-            "work_content": "提醒各位北方的电车小伙伴要注意冬季电池规划新能源..." * 5,
-            "publish_time": datetime.datetime.now(),
-            "crawled_time": datetime.datetime.now(),
-            "account_name": base64.b64encode(
-                base64.b64encode("测试账号".encode("utf-8"))
-            ).decode("utf-8"),
-            "source": "微博",
-            "like_cnt": 99,
-            "reply_cnt": 12,
-            "forward_cnt": 5,
-            "content_senti": 0,
-            "ocr_content": "OCR识别的长文本数据..." * 10
-        }
-        print("未检测到输入参数，使用示例数据进行测试推送...")
-        send_to_feishu(test_data)
+    monitor_tidb()
