@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
+# feishu_notify.py
 import requests
 import json
 import datetime
 import base64
+import sys
 
 WEBHOOK_URL = "https://open.feishu.cn/open-apis/bot/v2/hook/c74b9141-1759-40e2-ae3a-50cc6389e1bc"
 FEISHU_OPEN_ID = "ou_20b2bd16a8405b93019b7291ec5202c3"
@@ -112,23 +114,36 @@ def send_to_feishu(data: dict):
         print(f"❌ 调用飞书接口异常: {e}")
 
 if __name__ == "__main__":
-    # 测试数据
-    test_data = {
-        "id": 186,
-        "work_id": "315bd20e7e7690e27f2859689ac4ba04",
-        "work_url": "www.baidu.com",
-        "work_title": "提醒各位北方的电车小伙伴要注意冬季电池规划新能源冬天真是消耗大..." * 5,
-        "work_content": "提醒各位北方的电车小伙伴要注意冬季电池规划新能源..." * 5,
-        "publish_time": datetime.datetime.now(),
-        "crawled_time": datetime.datetime.now(),
-        "account_name": base64.b64encode(
-            base64.b64encode("测试账号".encode("utf-8"))
-        ).decode("utf-8"),
-        "source": "微博",
-        "like_cnt": 99,
-        "reply_cnt": 12,
-        "forward_cnt": 5,
-        "content_senti": 0,
-        "ocr_content": "OCR识别的长文本数据..." * 10
-    }
-    send_to_feishu(test_data)
+    # 运行逻辑：
+    # - 如果通过命令行传入 JSON 字符串（tidb 监控脚本调用），则推送新记录
+    # - 如果未传入参数，作为独立脚本运行，使用示例数据进行测试
+    if len(sys.argv) >= 2:
+        try:
+            row_json_str = sys.argv[1]
+            data = json.loads(row_json_str)
+            send_to_feishu(data)
+        except Exception as e:
+            print(f"❌ 解析输入 JSON 失败: {e}")
+            sys.exit(1)
+    else:
+        # 示例测试数据（仅独立运行时使用）
+        test_data = {
+            "id": 186,
+            "work_id": "315bd20e7e7690e27f2859689ac4ba04",
+            "work_url": "www.baidu.com",
+            "work_title": "提醒各位北方的电车小伙伴要注意冬季电池规划新能源冬天真是消耗大..." * 5,
+            "work_content": "提醒各位北方的电车小伙伴要注意冬季电池规划新能源..." * 5,
+            "publish_time": datetime.datetime.now(),
+            "crawled_time": datetime.datetime.now(),
+            "account_name": base64.b64encode(
+                base64.b64encode("测试账号".encode("utf-8"))
+            ).decode("utf-8"),
+            "source": "微博",
+            "like_cnt": 99,
+            "reply_cnt": 12,
+            "forward_cnt": 5,
+            "content_senti": 0,
+            "ocr_content": "OCR识别的长文本数据..." * 10
+        }
+        print("未检测到输入参数，使用示例数据进行测试推送...")
+        send_to_feishu(test_data)
