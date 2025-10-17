@@ -46,7 +46,7 @@ try:
                 if row.get('id', 0) > last_id:
                     last_id = row['id']
 
-        time.sleep(3)
+        time.sleep(60)
 
 except KeyboardInterrupt:
     print("监测程序已退出")
