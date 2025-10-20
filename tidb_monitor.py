@@ -6,7 +6,7 @@ import subprocess
 
 TABLE_NAME = "dwd_idc_life_ent_soc_public_sentiment_battery_work_mix_rt"
 
-# 数据库连接信息
+# 数据库连接信息（与 feishu_notify.py 保持一致）
 conn = pymysql.connect(
     host="da-dw-tidb-10900.chj.cloud",
     port=3306,
@@ -18,7 +18,7 @@ conn = pymysql.connect(
 )
 
 cursor = conn.cursor()
-last_id = 700
+last_id = 700  # 可按需调整或持久化
 
 print(f"开始监测 TiDB 表 {TABLE_NAME}，Ctrl+C 可退出...")
 
@@ -30,15 +30,14 @@ try:
 
         if rows:
             for row in rows:
-                # 只打印 work_id 到控制台
                 print(f"🔍 检测到新数据，work_id: {row.get('work_id', '')}")
 
-                # 转换成 JSON 字符串（所有类型都转成可序列化）
+                # 转换成 JSON 字符串（所有类型转成可序列化字符串）
                 row_json_str = json.dumps(row, ensure_ascii=False, default=str)
 
-                # 调用 notify_llm.py 发送到飞书（保持不变）
+                # 调用推送脚本（已在脚本内完成门禁、摘要与写入新表）
                 try:
-                    subprocess.run(["python3", "notify_llm.py", row_json_str])
+                    subprocess.run(["python3", "feishu_notify.py", row_json_str], check=False)
                 except Exception as e:
                     print(f"❌ 调用飞书通知脚本失败: {e}")
 
