@@ -36,9 +36,9 @@ try:
                 # 转换成 JSON 字符串（所有类型都转成可序列化）
                 row_json_str = json.dumps(row, ensure_ascii=False, default=str)
 
-                # 调用 feishu_notify.py 发送到飞书（保持不变）
+                # 调用 notify_llm.py 发送到飞书（保持不变）
                 try:
-                    subprocess.run(["python3", "feishu_notify.py", row_json_str])
+                    subprocess.run(["python3", "notify_llm.py", row_json_str])
                 except Exception as e:
                     print(f"❌ 调用飞书通知脚本失败: {e}")
 
