@@ -188,8 +188,8 @@ def parse_related_json(text: str) -> bool:
     if related is None:
         # 关键词降级：同时出现“理想”或“Li Auto/Li”与电池相关词，判定为相关
         all_text = raw
-        li_keywords = ["理想", "理想汽车", "Li Auto", "LI Auto", "li auto", "Li", "理想L", "理想ONE", "理想L7", "理想L8", "理想L9"]
-        batt_keywords = ["电池", "续航", "充电", "起火", "爆炸", "漏液", "鼓包", "内阻", "衰减", "低温", "BMS", "电量", "SOC", "容量"]
+        li_keywords = ["理想", "理想汽车", "Li Auto", "LI Auto", "li auto", "Li", "理想L", "理想ONE", "理想L7", "理想L8", "理想L9", "理想i8", "理想i6"]
+        batt_keywords = ["电池", "续航", "充电", "起火", "爆炸", "漏液", "鼓包", "内阻", "衰减", "低温", "BMS", "电量", "SOC", "容量" , "SOH"]
         has_li = any(k.lower() in all_text.lower() for k in li_keywords)
         has_batt = any(k.lower() in all_text.lower() for k in batt_keywords)
         related = bool(has_li and has_batt)
@@ -220,8 +220,8 @@ def check_related(data: dict) -> bool:
     except Exception:
         # 请求失败时采用关键词降级
         all_text = f"{title}\n{content}\n{ocr}"
-        li_keywords = ["理想", "理想汽车", "Li Auto", "LI Auto", "li auto", "Li", "理想L", "理想ONE", "理想L7", "理想L8", "理想L9"]
-        batt_keywords = ["电池", "续航", "充电", "起火", "爆炸", "漏液", "鼓包", "内阻", "衰减", "低温", "BMS", "电量", "SOC", "容量"]
+        li_keywords = ["理想", "理想汽车", "Li Auto", "LI Auto", "li auto", "Li", "理想L", "理想ONE", "理想L7", "理想L8", "理想L9", "理想i8", "理想i6"]
+        batt_keywords = ["电池", "续航", "充电", "起火", "爆炸", "漏液", "鼓包", "内阻", "衰减", "低温", "BMS", "电量", "SOC", "容量" , "SOH"]
         has_li = any(k.lower() in all_text.lower() for k in li_keywords)
         has_batt = any(k.lower() in all_text.lower() for k in batt_keywords)
         return bool(has_li and has_batt)
