@@ -18,7 +18,7 @@ conn = pymysql.connect(
 )
 
 cursor = conn.cursor()
-last_id = 1500
+last_id = 0
 
 print(f"开始监测 TiDB 表 {TABLE_NAME}，Ctrl+C 可退出...")
 
