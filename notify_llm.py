@@ -32,7 +32,7 @@ DB_CONFIG = {
 # 通知落库的目标表（新增：summary、event_level）
 NOTIFY_TABLE = "dwd_idc_life_ent_soc_public_sentiment_battery_work_notify_mix_rt"
 
-# 字段映射
+# 字段映射与展示顺序
 FIELD_MAP = {
     "summary":      "文章摘要",
     "work_id":      "主贴ID",
@@ -49,21 +49,13 @@ FIELD_MAP = {
     "content_senti":"内容情感",
     "ocr_content":  "OCR识别内容"
 }
-
-# 展示顺序（在主贴标题前新增“文章摘要”）
 ORDERED_FIELDS = [
     "source", "work_url", "publish_time", "account_name",
     "summary",
     "work_title", "work_content",
     "like_cnt", "reply_cnt", "forward_cnt"
 ]
-
-# 根据烈度输出处理意见
-ADVICE_BY_SEVERITY = {
-    "低": "请相关人员了解",
-    "中": "请相关人员关注",
-    "高": "请相关人员重点关注",
-}
+ADVICE_BY_SEVERITY = {"低": "请相关人员了解", "中": "请相关人员关注", "高": "请相关人员重点关注"}
 
 # ================= 公共工具 =================
 def double_base64_decode(s: str) -> str:
@@ -86,46 +78,31 @@ def map_senti(val):
     return {-1: "负面", 0: "中性", 1: "正面"}.get(v, str(v))
 
 def call_chat_completion_stream(prompt: str, model: str = "azure-gpt-4o") -> str:
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "stream": True
-    }
-
+    payload = {"model": model, "messages": [{"role": "user", "content": prompt}], "stream": True}
     result_chunks = []
     with requests.post(API_URL, headers=HEADERS, data=json.dumps(payload), stream=True, timeout=300) as resp:
         if resp.status_code != 200:
             raise RuntimeError(f"HTTP {resp.status_code}: {resp.text}")
-
         for raw_line in resp.iter_lines(chunk_size=1024, decode_unicode=False):
             if not raw_line:
                 continue
             line = raw_line.strip()
             if not line.startswith(b"data:"):
                 continue
-
             data_bytes = line[len(b"data:"):].strip()
             if data_bytes == b"[DONE]":
                 break
-
             try:
                 obj = json.loads(data_bytes.decode("utf-8"))
             except Exception:
                 result_chunks.append(data_bytes.decode("utf-8", errors="ignore"))
                 continue
-
             choices = obj.get("choices") or []
             for ch in choices:
                 delta = ch.get("delta") or {}
-                chunk = delta.get("content")
-                if chunk is None:
-                    chunk = ch.get("content")
-                if chunk is None:
-                    msg = ch.get("message") or {}
-                    chunk = msg.get("content")
+                chunk = delta.get("content") or ch.get("content") or (ch.get("message") or {}).get("content")
                 if chunk:
                     result_chunks.append(chunk)
-
     return "".join(result_chunks).strip()
 
 def _extract_json_from_text(text: str) -> str:
@@ -143,277 +120,80 @@ def _extract_json_from_text(text: str) -> str:
             elif c == "}":
                 depth -= 1
                 if depth == 0:
-                    candidate = s[start:i+1]
-                    return candidate.strip()
+                    return s[start:i+1].strip()
     return s
 
-# ================= 品牌与主题词检测 =================
-def contains_li_brand(text: str) -> bool:
+# ================= 统一评估（全靠大模型判定） =================
+def build_evaluation_prompt(title: str, content: str, ocr: str) -> str:
     """
-    严格匹配理想汽车品牌或车型：
-    理想汽车/Li Auto；理想ONE；理想L6/L7/L8/L9；理想i6/i8；理想Mega/MEGA
-    """
-    if not text:
-        return False
-    s = str(text)
-    patterns = [
-        r"理想汽车",
-        r"\bli\s*auto\b",            # Li Auto
-        r"理想\s*one", r"理想one",
-        r"理想\s*l6", r"理想\s*l7", r"理想\s*l8", r"理想\s*l9",
-        r"理想l6", r"理想l7", r"理想l8", r"理想l9",
-        r"理想\s*i6", r"理想\s*i8",
-        r"理想i6", r"理想i8",
-        r"理想\s*mega", r"理想\s*MEGA",
-        r"理想mega", r"理想MEGA",
-    ]
-    return any(re.search(pat, s, flags=re.IGNORECASE) for pat in patterns)
-
-def contains_competitor_brand(text: str) -> bool:
-    """
-    友商品牌列表（可扩充）。只要出现任一即视为有友商品牌信号。
-    """
-    if not text:
-        return False
-    s = str(text).lower()
-    competitors = [
-        # 新势力/国内
-        "特斯拉", "tesla",
-        "比亚迪", "byd",
-        "蔚来", "nio",
-        "小鹏", "xpeng",
-        "极氪", "zeekr",
-        "问界", "aito", "华为", "huawei", "赛力斯", "seres",
-        "智己", "im",
-        "岚图", "voyah",
-        "腾势", "denza",
-        "深蓝", "changan",
-        "哪吒", "hozon",
-        "零跑", "leapmotor",
-        "广汽埃安", "埃安", "aion", "gac",
-        "吉利", "geely",
-        # 传统国际品牌
-        "宝马", "bmw",
-        "奔驰", "mercedes", "benz",
-        "奥迪", "audi",
-        "大众", "vw", "volkswagen",
-        "丰田", "toyota",
-        "本田", "honda",
-        "日产", "nissan",
-        # 其它
-        "极越", "jiue",
-        "极狐", "arcfox",
-        "长城", "great wall",
-        "魏牌", "wey",
-        "坦克", "tank",
-        "小米汽车", "xiaomi", "su7",
-    ]
-    return any(k in s for k in competitors)
-
-def contains_battery_topic(text: str) -> bool:
-    if not text:
-        return False
-    s = str(text).lower()
-    batt_keywords = [
-        "电池", "续航", "充电", "慢充", "快充", "换电",
-        "起火", "爆炸", "漏液", "鼓包", "内阻", "衰减",
-        "低温", "高压", "低压", "bms", "电量", "soc", "soh",
-        "容量", "能量回收", "充电桩", "充电口", "充电枪", "高压包", "三电"
-    ]
-    return any(k in s for k in batt_keywords)
-
-def contains_range_extender_topic(text: str) -> bool:
-    """
-    增程器相关主题词：增程器/增程系统/增程/增程发动机/范围扩展器/RE（Range Extender）等
-    """
-    if not text:
-        return False
-    s = str(text).lower()
-    re_keywords = [
-        "增程器", "增程系统", "增程", "增程发动机", "范围扩展器",
-        "range extender", "range-extender", "增程模式", "增程机",
-        "发电机", "发动机增程", "erev", "增程版"
-    ]
-    return any(k in s for k in re_keywords)
-
-def is_negative_sentiment(val) -> bool:
-    """
-    仅推送负面情感。content_senti == -1 视为负面。
-    """
-    try:
-        return int(val) == -1
-    except Exception:
-        return False
-
-# ================= 相关性判定（推送门禁） =================
-def build_related_gate_prompt(title: str, content: str, ocr: str) -> str:
-    """
-    与理想汽车电池/增程器相关性的门禁判定提示词（强相关且主体聚焦版）。
-    仅返回纯 JSON：{"related":"是"} 或 {"related":"否"}。
-
-    必须满足（强相关）：
-    1) 明确出现理想汽车品牌或车型之一：
-       理想汽车 / Li Auto / 理想ONE / 理想L6 / 理想L7 / 理想L8 / 理想L9 / 理想i6 / 理想i8 / 理想Mega/MEGA。
-       注意：“理想生活”“理想状态”等非品牌语境不算。
-    2) 摘要与正文的主体聚焦于理想汽车的“电池或增程器”议题（如电池/续航/充电/安全/起火/爆炸/故障/低温/高压/BMS/SOC/SOH/容量/能量回收/增程器/增程系统/增程发动机等）。
-    3) 若仅出现友商品牌（特斯拉、比亚迪、蔚来、小鹏、极氪、问界、智己、岚图、腾势、深蓝、哪吒、零跑、埃安、吉利、宝马、奔驰、奥迪、大众等）
-       而未出现理想品牌或车型，或主体并非理想汽车的电池/增程器，则判定为“不相关”。
-
-    只返回纯 JSON，不要代码块或其他文字：
-    {"related": "是"} 或 {"related": "否"}
+    统一评估提示词（精简版）：
+    由模型同时判断主体聚焦、负面性、摘要与烈度。只返回纯 JSON，不使用关键词兜底。
+    focus: 是否“主体聚焦理想汽车（Li Auto/理想ONE/L6/L7/L8/L9/i6/i8/Mega）的电池或增程器”
+    negative: 针对该主体是否为“负面”（投诉/问题/风险/故障/事故/维权等；对比评测/一般建议不算）
     """
     title = title or ""
     content = content or ""
     ocr = ocr or ""
     return (
-        "请严格判断以下文本是否与“理想汽车”的电池或增程器强相关（避免把友商或非电池/增程器话题误判为理想）。"
-        "必须满足：出现理想汽车品牌/车型（理想汽车/Li Auto/理想ONE/理想L6/L7/L8/L9/理想i6/i8/理想Mega），且主体聚焦电池或增程器相关议题。"
-        "若仅出现友商品牌或主体并非理想的电池/增程器，则判定为“不相关”。"
-        "只返回纯 JSON，不要任何额外文字："
-        '{"related": "是"} 或 {"related": "否"}'
+        "请评估以下帖子，并只返回纯JSON（不含其余文字或代码块）："
+        '{"focus":"是|否","negative":"是|否","summary":"约50字中文摘要","severity":"低|中|高"}。'
+        "判定规则："
+        "focus=是：帖子的主体聚焦“理想汽车（Li Auto/理想ONE/L6/L7/L8/L9/i6/i8/Mega）的电池或增程器（增程系统/增程发动机）”。"
+        "negative=是：针对该主体为负面：投诉/问题/风险/故障/事故/维权/召回等；若为品牌对比/评测/一般建议/科普，则negative=否。"
         f"\n标题：{title}\n正文：{content}\nOCR：{ocr}\n"
-        "只返回上述 JSON。"
+        "只返回上述JSON。"
     )
 
-def parse_related_json(text: str) -> bool:
-    raw = text.strip()
-    json_str = _extract_json_from_text(raw)
-    related = None
-    try:
-        obj = json.loads(json_str)
-        if isinstance(obj, dict):
-            val = str(obj.get("related", "")).strip()
-            if val in ("是", "否"):
-                related = (val == "是")
-    except Exception:
-        pass
-
-    if related is None:
-        # 回退规则：品牌 + （电池或增程器）主题同时出现
-        has_li = contains_li_brand(raw)
-        has_batt = contains_battery_topic(raw) or contains_range_extender_topic(raw)
-        related = bool(has_li and has_batt)
-
-    return related
-
-def check_related(data: dict) -> bool:
+def parse_evaluation_json(text: str):
     """
-    使用大模型进行门禁判定：是否与理想汽车电池或增程器强相关。
-    更严格兜底：若文本出现友商品牌且未出现理想品牌/车型，则强制判定为不相关。
-    同时要求必然出现电池或增程器相关话题。
-    """
-    title = data.get("work_title") or ""
-    content = data.get("work_content") or ""
-    ocr = data.get("ocr_content") or ""
-    raw_text = f"{title}\n{content}\n{ocr}"
-
-    # 快速兜底：出现友商且没有理想品牌/车型 => 不相关
-    if contains_competitor_brand(raw_text) and not contains_li_brand(raw_text):
-        return False
-
-    # 避免非字符串类型导致提示词异常
-    t = title if isinstance(title, str) else json.dumps(title, ensure_ascii=False)
-    c = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
-    o = ocr if isinstance(ocr, str) else json.dumps(ocr, ensure_ascii=False)
-
-    prompt = build_related_gate_prompt(t, c, o)
-    try:
-        llm_text = call_chat_completion_stream(prompt, model="azure-gpt-4o")
-        related_by_llm = parse_related_json(llm_text)
-    except Exception:
-        related_by_llm = None
-
-    # 必须条件：理想品牌/车型 + （电池或增程器）话题
-    has_li_brand = contains_li_brand(raw_text)
-    has_topic = contains_battery_topic(raw_text) or contains_range_extender_topic(raw_text)
-    has_competitor = contains_competitor_brand(raw_text)
-
-    # 如果模型说“是”，但出现友商且没有理想品牌/车型，则纠正为否
-    if related_by_llm is True and has_competitor and not has_li_brand:
-        return False
-
-    # 模型不可用时，用规则判定
-    if related_by_llm is None:
-        return bool(has_li_brand and has_topic)
-
-    # 模型结果为 True 也要满足硬性条件
-    return bool(related_by_llm and has_li_brand and has_topic)
-
-# ================= 摘要与烈度（含主体聚焦判定） =================
-def build_summary_prompt(title: str, content: str, ocr: str) -> str:
-    """
-    生成摘要、烈度，并额外判断“摘要的主体是否聚焦理想汽车的电池或增程器”。
-    返回纯 JSON：
-    {"summary": "...", "severity": "低|中|高", "focus": "是|否"}
-    """
-    title = title or ""
-    content = content or ""
-    ocr = ocr or ""
-    return (
-        "你是企业舆情分析助手。请阅读主贴标题、正文、OCR识别内容。"
-        "请完成："
-        "1) 用中文输出约50字的一段事件摘要（不包含判断语气）；"
-        "2) 单独给出事件烈度，仅可为：低/中/高；"
-        "3) 判断该摘要的主体是否聚焦“理想汽车（理想汽车/Li Auto/理想ONE/L6/L7/L8/L9/i6/i8/Mega）”的电池或增程器（增程系统/增程发动机），是或否。"
-        "严格返回纯 JSON 文本，不要任何额外文字、不要代码块或反引号："
-        '{"summary": "<事件摘要>", "severity": "<低|中|高>", "focus": "<是|否>"}'
-        f"\n标题：{title}\n正文：{content}\nOCR：{ocr}\n"
-        "只返回上述 JSON。"
-    )
-
-def parse_summary_json(text: str):
-    """
-    解析 {"summary": "...", "severity": "低|中|高", "focus": "是|否"}
-    若 JSON 不规范，降级：从全文提取摘要；烈度默认中；focus 通过摘要和原文关键词规则估计。
+    解析统一评估JSON；解析失败则返回默认值，避免误推：
+    focus默认否；negative默认否；severity默认中；summary为原文（去掉代码块）。
     """
     raw = text.strip()
     json_str = _extract_json_from_text(raw)
+    focus = "否"
+    negative = "否"
     summary = None
-    severity = None
-    focus = None
+    severity = "中"
     try:
         obj = json.loads(json_str)
         if isinstance(obj, dict):
-            summary = str(obj.get("summary", "")).strip() or None
-            severity = str(obj.get("severity", "")).strip() or None
-            focus_val = obj.get("focus") or obj.get("focus_li_battery_or_range_extender")
-            if focus_val is not None:
-                focus = str(focus_val).strip()
+            fv = obj.get("focus"); nv = obj.get("negative")
+            sv = obj.get("summary"); sev = obj.get("severity")
+            if isinstance(fv, str):
+                fvs = fv.strip()
+                if fvs in ("是","否"): focus = fvs
+            if isinstance(nv, str):
+                nvs = nv.strip()
+                if nvs in ("是","否"): negative = nvs
+            if isinstance(sv, str):
+                summary = sv.strip() or None
+            if isinstance(sev, str) and sev.strip() in ("低","中","高"):
+                severity = sev.strip()
     except Exception:
         pass
-
     if summary is None:
         summary = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.IGNORECASE).strip()
-    if severity not in ("低", "中", "高"):
-        m = re.search(r"(低|中|高)", raw)
-        severity = m.group(1) if m else "中"
-    if focus not in ("是", "否"):
-        has_li = contains_li_brand(summary)
-        has_topic = contains_battery_topic(summary) or contains_range_extender_topic(summary)
-        focus = "是" if (has_li and has_topic) else "否"
+    return focus, negative, summary, severity
 
-    return summary, severity, focus
-
-def generate_summary_and_severity(data: dict):
+def evaluate_post(data: dict):
     """
-    基于主贴标题、正文内容和 OCR 内容生成摘要与烈度，并返回主体聚焦判定（focus）。
+    统一调用模型完成评估；不做任何关键词或规则兜底。
+    满足 focus=是 且 negative=是 才允许推送落库。
     """
     title = data.get("work_title") or ""
     content = data.get("work_content") or ""
     ocr = data.get("ocr_content") or ""
-
     t = title if isinstance(title, str) else json.dumps(title, ensure_ascii=False)
     c = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
     o = ocr if isinstance(ocr, str) else json.dumps(ocr, ensure_ascii=False)
-
-    prompt = build_summary_prompt(t, c, o)
+    prompt = build_evaluation_prompt(t, c, o)
     try:
         llm_text = call_chat_completion_stream(prompt, model="azure-gpt-4o")
     except Exception as e:
-        return f"[摘要生成失败] {e}", "中", "否"
-
-    summary, severity, focus = parse_summary_json(llm_text)
-    return summary, severity, focus
+        # 模型不可用时，为避免误推，直接判定不推送
+        return "否", "否", f"[评估失败] {e}", "中"
+    return parse_evaluation_json(llm_text)
 
 # ================= 推送数据落库 =================
 def _safe_int(v, default=None):
@@ -425,10 +205,6 @@ def _safe_int(v, default=None):
         return default
 
 def save_notify_record_to_tidb(data: dict, summary_text: str, severity: str):
-    """
-    将即将/已经推送到飞书的数据落库到通知表（同库）。
-    使用 work_id 作为唯一键，若已存在则更新。
-    """
     try:
         conn = pymysql.connect(**DB_CONFIG)
         conn.autocommit(True)
@@ -490,56 +266,32 @@ def save_notify_record_to_tidb(data: dict, summary_text: str, severity: str):
 
 # ================= 推送流程 =================
 def send_to_feishu(data: dict):
-    # 先进行负面情感门禁，仅推送负面
-    if not is_negative_sentiment(data.get("content_senti")):
-        print("跳过推送与落库：非负面情感（仅推送负面情感）。")
-        return False
-
-    # 门禁：判断是否与理想汽车电池/增程器强相关，不相关则跳过
-    try:
-        if not check_related(data):
-            print("跳过推送与落库：判定与理想汽车电池/增程器不强相关。")
-            return False
-    except Exception as e:
-        print(f"相关性判定异常，默认跳过推送与落库：{e}")
-        return False
-
-    post_content = []
-
-    # 生成摘要与烈度，并获取主体聚焦判定
-    summary_text, severity, focus = generate_summary_and_severity(data)
-
-    # 主体聚焦门禁：若摘要主体不是理想汽车的电池或增程器，则不推送、不落库
+    # 完全依赖大模型评估：主体聚焦 + 负面
+    focus, negative, summary_text, severity = evaluate_post(data)
     if focus != "是":
-        print("跳过推送与落库：摘要主体不聚焦理想汽车的电池或增程器。")
+        print("跳过推送与落库：模型评估主体未聚焦理想汽车的电池或增程器。")
+        return False
+    if negative != "是":
+        print("跳过推送与落库：模型评估该主体非负面。")
         return False
 
     advice = ADVICE_BY_SEVERITY.get(severity, ADVICE_BY_SEVERITY["中"])
 
+    post_content = []
     for k in ORDERED_FIELDS:
-        if k == "summary":
-            v = summary_text
-        else:
-            if k not in data:
-                continue
-            v = data.get(k)
-
-            if isinstance(v, datetime.datetime):
-                v = v.strftime("%Y-%m-%d %H:%M:%S")
-            if v is None:
-                v = ""
-
-            if k in ("work_title", "work_content", "ocr_content"):
-                v = truncate_text(v, limit=200)
-            if k == "account_name":
-                v = double_base64_decode(v)
-            if k == "content_senti":
-                v = map_senti(v)
-
+        v = summary_text if k == "summary" else data.get(k)
+        if isinstance(v, datetime.datetime):
+            v = v.strftime("%Y-%m-%d %H:%M:%S")
+        if v is None:
+            v = ""
+        if k in ("work_title", "work_content", "ocr_content"):
+            v = truncate_text(v, limit=200)
+        if k == "account_name":
+            v = double_base64_decode(v)
+        if k == "content_senti":
+            v = map_senti(v)
         label = FIELD_MAP.get(k, k)
-        post_content.append([
-            {"tag": "text", "text": f"【{label}】: {v}"}
-        ])
+        post_content.append([{"tag": "text", "text": f"【{label}】: {v}"}])
 
     post_content.append([
         {"tag": "at", "user_id": FEISHU_OPEN_ID},
@@ -549,12 +301,7 @@ def send_to_feishu(data: dict):
     payload = {
         "msg_type": "post",
         "content": {
-            "post": {
-                "zh_cn": {
-                    "title": "📢 新增负面舆情告警（理想电池/增程器）",
-                    "content": post_content
-                }
-            }
+            "post": {"zh_cn": {"title": "📢 新增负面舆情告警（理想电池/增程器）", "content": post_content}}
         }
     }
 
@@ -579,7 +326,6 @@ def send_to_feishu(data: dict):
     except Exception as e:
         print(f"❌ 调用飞书接口异常: {e}")
 
-    # 推送成功后落库（如需相关即落库，可改为无论 ok 与否都执行 save_notify_record_to_tidb）
     if ok:
         try:
             save_notify_record_to_tidb(data, summary_text, severity)
@@ -604,19 +350,17 @@ if __name__ == "__main__":
             "id": 186,
             "work_id": "315bd20e7e7690e27f2859689ac4ba04",
             "work_url": "www.baidu.com",
-            "work_title": "理想L9在寒潮中续航衰减明显，用户反馈充电慢",
-            "work_content": "有车主反映理想L9在低温环境下电池表现不佳，续航下降并且充电速度慢，需要优化BMS策略。",
+            "work_title": "理想L9电池低温充电失败并多次报错，用户投诉",
+            "work_content": "车主称理想L9在寒潮下无法充电且频繁BMS报错，续航大幅下降，存在安全隐患，已向厂家投诉。",
             "publish_time": datetime.datetime.now(),
             "crawled_time": datetime.datetime.now(),
-            "account_name": base64.b64encode(
-                base64.b64encode("测试账号".encode("utf-8"))
-            ).decode("utf-8"),
+            "account_name": base64.b64encode(base64.b64encode("测试账号".encode("utf-8"))).decode("utf-8"),
             "source": "微博",
             "like_cnt": 99,
             "reply_cnt": 12,
             "forward_cnt": 5,
-            "content_senti": -1,  # 负面
-            "ocr_content": "理想汽车L9低温续航下降充电慢的舆情曝光"
+            "content_senti": -1,
+            "ocr_content": "理想汽车L9低温无法充电频繁报错，疑似BMS故障，用户维权"
         }
         print("未检测到输入参数，使用示例数据进行测试推送并落库...")
         send_to_feishu(test_data)
