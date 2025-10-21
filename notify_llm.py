@@ -123,49 +123,53 @@ def _extract_json_from_text(text: str) -> str:
                     return s[start:i+1].strip()
     return s
 
-# ================= 统一评估（全靠大模型判定） =================
+# ================= 统一评估（严格围绕问题的主体聚焦 + 对比评测约束） =================
 def build_evaluation_prompt(title: str, content: str, ocr: str) -> str:
     """
-    统一评估提示词（精简版）：
-    由模型同时判断主体聚焦、负面性、摘要与烈度。只返回纯 JSON，不使用关键词兜底。
-    focus: 是否“主体聚焦理想汽车（Li Auto/理想ONE/L6/L7/L8/L9/i6/i8/Mega）的电池或增程器”
-    negative: 针对该主体是否为“负面”（投诉/问题/风险/故障/事故/维权等；对比评测/一般建议不算）
+    统一评估提示词（严格版）：
+    由模型同时判断：
+    - focus: 主体是否严格聚焦“理想汽车（Li Auto/理想ONE/L6/L7/L8/L9/i6/i8/Mega）的电池或增程器（增程系统/增程发动机）的问题”；
+    - problem: 是否明确指出上述主体存在“不足/缺陷/风险/故障/事故/投诉/维权/召回”等问题（对比/评测类内容除非明确指出理想电池或增程器有问题，否则为否）；
+    - summary: 约50字中文摘要；
+    - severity: 低/中/高。
+    只返回纯JSON，不得包含其他文字或代码块。
     """
     title = title or ""
     content = content or ""
     ocr = ocr or ""
     return (
-        "请评估以下帖子，并只返回纯JSON（不含其余文字或代码块）："
-        '{"focus":"是|否","negative":"是|否","summary":"约50字中文摘要","severity":"低|中|高"}。'
+        "请严格评估以下帖子，并只返回纯JSON："
+        '{"focus":"是|否","problem":"是|否","summary":"约50字中文摘要","severity":"低|中|高"}。'
         "判定规则："
-        "focus=是：帖子的主体聚焦“理想汽车（Li Auto/理想ONE/L6/L7/L8/L9/i6/i8/Mega）的电池或增程器（增程系统/增程发动机）”。"
-        "negative=是：针对该主体为负面：投诉/问题/风险/故障/事故/维权/召回等；若为品牌对比/评测/一般建议/科普，则negative=否。"
+        "focus=是：帖子的主体必须严格围绕理想汽车（Li Auto/理想ONE/L6/L7/L8/L9/i6/i8/Mega）的电池或增程器的问题。"
+        "problem=是：明确指出理想电池或增程器存在不足/缺陷/风险/故障/事故/投诉/维权/召回等问题；"
+        "若为品牌对比/评测/体验分享/一般建议/科普等，且未明确指出理想电池或增程器有问题，则problem=否。"
         f"\n标题：{title}\n正文：{content}\nOCR：{ocr}\n"
         "只返回上述JSON。"
     )
 
 def parse_evaluation_json(text: str):
     """
-    解析统一评估JSON；解析失败则返回默认值，避免误推：
-    focus默认否；negative默认否；severity默认中；summary为原文（去掉代码块）。
+    解析统一评估JSON；解析失败则返回默认值（不推送）：
+    focus默认否；problem默认否；severity默认中；summary为原文（去掉代码块）。
     """
     raw = text.strip()
     json_str = _extract_json_from_text(raw)
     focus = "否"
-    negative = "否"
+    problem = "否"
     summary = None
     severity = "中"
     try:
         obj = json.loads(json_str)
         if isinstance(obj, dict):
-            fv = obj.get("focus"); nv = obj.get("negative")
+            fv = obj.get("focus"); pv = obj.get("problem")
             sv = obj.get("summary"); sev = obj.get("severity")
             if isinstance(fv, str):
                 fvs = fv.strip()
                 if fvs in ("是","否"): focus = fvs
-            if isinstance(nv, str):
-                nvs = nv.strip()
-                if nvs in ("是","否"): negative = nvs
+            if isinstance(pv, str):
+                pvs = pv.strip()
+                if pvs in ("是","否"): problem = pvs
             if isinstance(sv, str):
                 summary = sv.strip() or None
             if isinstance(sev, str) and sev.strip() in ("低","中","高"):
@@ -174,12 +178,12 @@ def parse_evaluation_json(text: str):
         pass
     if summary is None:
         summary = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.IGNORECASE).strip()
-    return focus, negative, summary, severity
+    return focus, problem, summary, severity
 
 def evaluate_post(data: dict):
     """
     统一调用模型完成评估；不做任何关键词或规则兜底。
-    满足 focus=是 且 negative=是 才允许推送落库。
+    满足 focus=是 且 problem=是 才允许推送落库。
     """
     title = data.get("work_title") or ""
     content = data.get("work_content") or ""
@@ -266,13 +270,13 @@ def save_notify_record_to_tidb(data: dict, summary_text: str, severity: str):
 
 # ================= 推送流程 =================
 def send_to_feishu(data: dict):
-    # 完全依赖大模型评估：主体聚焦 + 负面
-    focus, negative, summary_text, severity = evaluate_post(data)
+    # 完全依赖大模型评估：主体严格围绕理想电池/增程器问题 + 明确指出问题
+    focus, problem, summary_text, severity = evaluate_post(data)
     if focus != "是":
-        print("跳过推送与落库：模型评估主体未聚焦理想汽车的电池或增程器。")
+        print("跳过推送与落库：主体未严格聚焦理想汽车的电池或增程器问题。")
         return False
-    if negative != "是":
-        print("跳过推送与落库：模型评估该主体非负面。")
+    if problem != "是":
+        print("跳过推送与落库：未明确指出理想电池或增程器存在不足/缺陷/风险/故障等问题（对比/评测未明确指出问题不推送）。")
         return False
 
     advice = ADVICE_BY_SEVERITY.get(severity, ADVICE_BY_SEVERITY["中"])
@@ -301,7 +305,7 @@ def send_to_feishu(data: dict):
     payload = {
         "msg_type": "post",
         "content": {
-            "post": {"zh_cn": {"title": "📢 新增负面舆情告警（理想电池/增程器）", "content": post_content}}
+            "post": {"zh_cn": {"title": "📢 问题舆情告警（理想电池/增程器）", "content": post_content}}
         }
     }
 
