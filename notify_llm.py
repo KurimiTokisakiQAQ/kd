@@ -147,15 +147,107 @@ def _extract_json_from_text(text: str) -> str:
                     return candidate.strip()
     return s
 
+# ================= 品牌与主题词检测 =================
+def contains_li_brand(text: str) -> bool:
+    """
+    严格匹配理想汽车品牌或车型：
+    理想汽车/Li Auto；理想ONE；理想L6/L7/L8/L9；理想i6/i8；理想MEGA/Mega
+    """
+    if not text:
+        return False
+    s = str(text)
+    patterns = [
+        r"理想汽车",
+        r"\bli\s*auto\b",            # Li Auto
+        r"理想\s*one",               # 理想ONE
+        r"理想\s*l6", r"理想\s*l7", r"理想\s*l8", r"理想\s*l9",  # 理想L6-L9
+        r"理想l6", r"理想l7", r"理想l8", r"理想l9",
+        r"理想\s*i6", r"理想\s*i8",   # 理想i6/i8
+        r"理想i6", r"理想i8",
+        r"理想\s*mega", r"理想\s*MEGA",  # 理想Mega/MEGA
+        r"理想mega", r"理想MEGA",
+    ]
+    return any(re.search(pat, s, flags=re.IGNORECASE) for pat in patterns)
+
+def contains_competitor_brand(text: str) -> bool:
+    """
+    友商品牌列表（可扩充）。只要出现任一即视为有友商品牌信号。
+    """
+    if not text:
+        return False
+    s = str(text).lower()
+    competitors = [
+        # 新势力/国内
+        "特斯拉", "tesla",
+        "比亚迪", "byd",
+        "蔚来", "nio",
+        "小鹏", "xpeng",
+        "极氪", "zeekr",
+        "问界", "aito", "华为", "huawei", "赛力斯", "seres",
+        "智己", "im",
+        "岚图", "voyah",
+        "腾势", "denza",
+        "深蓝", "changan",
+        "哪吒", "hozon",
+        "零跑", "leapmotor",
+        "广汽埃安", "埃安", "aion", "gac",
+        "吉利", "geely",
+        "理想以外品牌",  # 占位提示，无实际作用
+        # 传统国际品牌
+        "宝马", "bmw",
+        "奔驰", "mercedes", "benz",
+        "奥迪", "audi",
+        "大众", "vw", "volkswagen",
+        "丰田", "toyota",
+        "本田", "honda",
+        "日产", "nissan",
+        # 其它
+        "极越", "jiue",
+        "极狐", "arcfox",
+        "长城", "great wall",
+        "魏牌", "wey",
+        "坦克", "tank",
+        "小米汽车", "xiaomi", "su7",
+    ]
+    return any(k in s for k in competitors)
+
+def contains_battery_topic(text: str) -> bool:
+    if not text:
+        return False
+    s = str(text).lower()
+    batt_keywords = [
+        "电池", "续航", "充电", "慢充", "快充", "换电",
+        "起火", "爆炸", "漏液", "鼓包", "内阻", "衰减",
+        "低温", "高压", "低压", "bms", "电量", "soc", "soh",
+        "容量", "能量回收", "充电桩", "充电口", "充电枪", "高压包", "三电"
+    ]
+    return any(k in s for k in batt_keywords)
+
 # ================= 相关性判定（推送门禁） =================
 def build_related_gate_prompt(title: str, content: str, ocr: str) -> str:
+    """
+    与理想汽车电池相关性的门禁判定提示词（更严格版）。
+    仅返回纯 JSON：{"related":"是"} 或 {"related":"否"}。
+
+    严格判定规则（必须同时满足）：
+    1) 文本中明确出现理想汽车品牌或车型之一：
+       理想汽车 / Li Auto / 理想ONE / 理想L6 / 理想L7 / 理想L8 / 理想L9 / 理想i6 / 理想i8 / 理想MEGA/Mega。
+       注意：出现“理想”一词但非品牌语境（如“理想生活”“理想状态”）不算品牌指向。
+    2) 话题聚焦电池相关议题（电池、续航、充电、慢充、快充、换电、安全、起火、爆炸、故障、低温、高压、BMS、SOC、SOH、容量、能量回收等）。
+    3) 若只出现友商品牌（如特斯拉、比亚迪、蔚来、小鹏、极氪、问界、智己、岚图、腾势、深蓝、哪吒、零跑、埃安、吉利、宝马、奔驰、奥迪、大众等）
+       而没有出现理想品牌或车型，则判定为“不相关”。
+
+    只返回纯 JSON，不要代码块或其他文字：
+    {"related": "是"} 或 {"related": "否"}
+    """
     title = title or ""
     content = content or ""
     ocr = ocr or ""
     return (
-        "请判断以下文本是否与“理想汽车”的电池相关。"
-        "标准：出现理想汽车/理想（Li Auto/Li）的品牌指向，且话题聚焦电池相关议题（电池、续航、充电、安全、起火、爆炸、故障、低温、BMS等）。"
-        "只返回纯 JSON，不要代码块或其他文字："
+        "请严格判断以下文本是否与“理想汽车”的电池相关（避免把友商电池话题误判为理想）。"
+        "必须满足：出现理想汽车品牌/车型（理想汽车/Li Auto/理想ONE/理想L6/L7/L8/L9/理想i6/i8/理想MEGA），且话题集中在电池相关议题。"
+        "若仅出现友商品牌（如特斯拉、比亚迪、蔚来、小鹏、极氪、问界、智己、岚图、腾势、深蓝、哪吒、零跑、埃安、吉利、宝马、奔驰、奥迪、大众等）而未出现理想品牌或车型，则判定为“不相关”。"
+        "只返回纯 JSON，不要任何额外文字："
         '{"related": "是"} 或 {"related": "否"}'
         f"\n标题：{title}\n正文：{content}\nOCR：{ocr}\n"
         "只返回上述 JSON。"
@@ -175,37 +267,55 @@ def parse_related_json(text: str) -> bool:
         pass
 
     if related is None:
-        all_text = raw
-        li_keywords = ["理想", "理想汽车", "Li Auto", "LI Auto", "li auto", "Li", "理想L", "理想ONE", "理想L7", "理想L8", "理想L9", "理想i8", "理想i6"]
-        batt_keywords = ["电池", "续航", "充电", "起火", "爆炸", "漏液", "鼓包", "内阻", "衰减", "低温", "BMS", "电量", "SOC", "容量" , "SOH"]
-        has_li = any(k.lower() in all_text.lower() for k in li_keywords)
-        has_batt = any(k.lower() in all_text.lower() for k in batt_keywords)
+        # 回退规则：品牌 + 电池话题同时出现
+        has_li = contains_li_brand(raw)
+        has_batt = contains_battery_topic(raw)
         related = bool(has_li and has_batt)
 
     return related
 
 def check_related(data: dict) -> bool:
+    """
+    使用大模型进行门禁判定：是否与理想汽车电池相关。
+    更严格兜底：若文本出现友商品牌且未出现理想品牌/车型，则强制判定为不相关。
+    同时要求必然出现电池相关话题。
+    """
     title = data.get("work_title") or ""
     content = data.get("work_content") or ""
     ocr = data.get("ocr_content") or ""
-    if isinstance(title, (dict, list)):
-        title = json.dumps(title, ensure_ascii=False)
-    if isinstance(content, (dict, list)):
-        content = json.dumps(content, ensure_ascii=False)
-    if isinstance(ocr, (dict, list)):
-        ocr = json.dumps(ocr, ensure_ascii=False)
+    raw_text = f"{title}\n{content}\n{ocr}"
 
-    prompt = build_related_gate_prompt(title, content, ocr)
+    # 快速兜底：出现友商且没有理想品牌/车型 => 不相关
+    if contains_competitor_brand(raw_text) and not contains_li_brand(raw_text):
+        return False
+
+    # 避免非字符串类型导致提示词异常
+    t = title if isinstance(title, str) else json.dumps(title, ensure_ascii=False)
+    c = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+    o = ocr if isinstance(ocr, str) else json.dumps(ocr, ensure_ascii=False)
+
+    prompt = build_related_gate_prompt(t, c, o)
     try:
         llm_text = call_chat_completion_stream(prompt, model="azure-gpt-4o")
-        return parse_related_json(llm_text)
+        related_by_llm = parse_related_json(llm_text)
     except Exception:
-        all_text = f"{title}\n{content}\n{ocr}"
-        li_keywords = ["理想", "理想汽车", "Li Auto", "LI Auto", "li auto", "Li", "理想L", "理想ONE", "理想L7", "理想L8", "理想L9", "理想i8", "理想i6"]
-        batt_keywords = ["电池", "续航", "充电", "起火", "爆炸", "漏液", "鼓包", "内阻", "衰减", "低温", "BMS", "电量", "SOC", "容量" , "SOH"]
-        has_li = any(k.lower() in all_text.lower() for k in li_keywords)
-        has_batt = any(k.lower() in all_text.lower() for k in batt_keywords)
-        return bool(has_li and has_batt)
+        related_by_llm = None
+
+    # 必须条件：理想品牌/车型 + 电池话题
+    has_li_brand = contains_li_brand(raw_text)
+    has_batt = contains_battery_topic(raw_text)
+    has_competitor = contains_competitor_brand(raw_text)
+
+    # 如果模型说“是”，但出现友商且没有理想品牌/车型，则纠正为否
+    if related_by_llm is True and has_competitor and not has_li_brand:
+        return False
+
+    # 模型不可用时，用规则判定
+    if related_by_llm is None:
+        return bool(has_li_brand and has_batt)
+
+    # 模型结果为 True 也要满足硬性条件
+    return bool(related_by_llm and has_li_brand and has_batt)
 
 # ================= 摘要与烈度 =================
 def build_summary_prompt(title: str, content: str, ocr: str) -> str:
@@ -250,14 +360,11 @@ def generate_summary_and_severity(data: dict):
     content = data.get("work_content") or ""
     ocr = data.get("ocr_content") or ""
 
-    if isinstance(title, (dict, list)):
-        title = json.dumps(title, ensure_ascii=False)
-    if isinstance(content, (dict, list)):
-        content = json.dumps(content, ensure_ascii=False)
-    if isinstance(ocr, (dict, list)):
-        ocr = json.dumps(ocr, ensure_ascii=False)
+    t = title if isinstance(title, str) else json.dumps(title, ensure_ascii=False)
+    c = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+    o = ocr if isinstance(ocr, str) else json.dumps(ocr, ensure_ascii=False)
 
-    prompt = build_summary_prompt(title, content, ocr)
+    prompt = build_summary_prompt(t, c, o)
     try:
         llm_text = call_chat_completion_stream(prompt, model="azure-gpt-4o")
     except Exception as e:
@@ -419,7 +526,7 @@ def send_to_feishu(data: dict):
     except Exception as e:
         print(f"❌ 调用飞书接口异常: {e}")
 
-    # 仅当需要推送（相关性为真）时进行落库；是否要求“仅在推送成功后落库”取决于业务，这里选择推送成功后落库
+    # 推送成功后落库（如需相关即落库，可改为无论 ok 与否都执行 save_notify_record_to_tidb）
     if ok:
         try:
             save_notify_record_to_tidb(data, summary_text, severity)
@@ -444,8 +551,8 @@ if __name__ == "__main__":
             "id": 186,
             "work_id": "315bd20e7e7690e27f2859689ac4ba04",
             "work_url": "www.baidu.com",
-            "work_title": "电池爆炸，死伤10余人（理想L9疑似事故）",
-            "work_content": "据现场消息，疑似理想L9发生电池爆炸导致人员伤亡，具体原因调查中",
+            "work_title": "理想L9在寒潮中续航衰减明显，用户反馈充电慢",
+            "work_content": "有车主反映理想L9在低温环境下电池表现不佳，续航下降并且充电速度慢，需要优化BMS策略。",
             "publish_time": datetime.datetime.now(),
             "crawled_time": datetime.datetime.now(),
             "account_name": base64.b64encode(
@@ -456,7 +563,7 @@ if __name__ == "__main__":
             "reply_cnt": 12,
             "forward_cnt": 5,
             "content_senti": 0,
-            "ocr_content": "报道称理想汽车某车型电池故障引发起火爆炸，现场有伤亡"
+            "ocr_content": "理想汽车L9低温续航下降充电慢的舆情曝光"
         }
         print("未检测到输入参数，使用示例数据进行测试推送并落库...")
         send_to_feishu(test_data)
