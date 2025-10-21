@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# feishu_notify.py
+# notify_llm.py
 import requests
 import json
 import datetime
@@ -8,26 +8,31 @@ import sys
 import re
 import pymysql
 
-# ============ 飞书与大模型配置 ============
 WEBHOOK_URL = "https://open.feishu.cn/open-apis/bot/v2/hook/c74b9141-1759-40e2-ae3a-50cc6389e1bc"
 FEISHU_OPEN_ID = "ou_20b2bd16a8405b93019b7291ec5202c3"
 
+# 大模型调用配置（已鉴权）
 API_URL = "https://llm-cmt-api.dev.fc.chj.cloud/agentops/chat/completions"
 HEADERS = {
     "Content-Type": "application/json",
+    # "Authorization": "Bearer <your-token>",
 }
 
-# ============ TiDB 连接信息（与监控程序保持一致） ============
-TIDB_HOST = "da-dw-tidb-10900.chj.cloud"
-TIDB_PORT = 3306
-TIDB_USER = "da_algo_craw_wr"
-TIDB_PASSWORD = "99FBD18120C777560A9451FB65A8E74F60CFBBD3"
-TIDB_DATABASE = "da_crawler_dw"
+# TiDB 连接信息（与监控表同库）
+DB_CONFIG = {
+    "host": "da-dw-tidb-10900.chj.cloud",
+    "port": 3306,
+    "user": "da_algo_craw_wr",
+    "password": "99FBD18120C777560A9451FB65A8E74F60CFBBD3",
+    "database": "da_crawler_dw",
+    "charset": "utf8mb4",
+    "cursorclass": pymysql.cursors.DictCursor
+}
 
-# 写入“已筛选用于推送告警”的记录的新表（多了 summary 和 event_level）
+# 通知落库的目标表（新增：summary、event_level）
 NOTIFY_TABLE = "dwd_idc_life_ent_soc_public_sentiment_battery_work_notify_mix_rt"
 
-# ============ 字段与展示 ============
+# 字段映射
 FIELD_MAP = {
     "summary":      "文章摘要",
     "work_id":      "主贴ID",
@@ -45,6 +50,7 @@ FIELD_MAP = {
     "ocr_content":  "OCR识别内容"
 }
 
+# 展示顺序（在主贴标题前新增“文章摘要”）
 ORDERED_FIELDS = [
     "source", "work_url", "publish_time", "account_name",
     "summary",
@@ -52,13 +58,14 @@ ORDERED_FIELDS = [
     "like_cnt", "reply_cnt", "forward_cnt"
 ]
 
+# 根据烈度输出处理意见
 ADVICE_BY_SEVERITY = {
     "低": "请相关人员了解",
     "中": "请相关人员关注",
     "高": "请相关人员重点关注",
 }
 
-# ============ 工具函数 ============
+# ================= 公共工具 =================
 def double_base64_decode(s: str) -> str:
     try:
         return base64.b64decode(base64.b64decode(s)).decode("utf-8")
@@ -84,24 +91,29 @@ def call_chat_completion_stream(prompt: str, model: str = "azure-gpt-4o") -> str
         "messages": [{"role": "user", "content": prompt}],
         "stream": True
     }
+
     result_chunks = []
     with requests.post(API_URL, headers=HEADERS, data=json.dumps(payload), stream=True, timeout=300) as resp:
         if resp.status_code != 200:
             raise RuntimeError(f"HTTP {resp.status_code}: {resp.text}")
+
         for raw_line in resp.iter_lines(chunk_size=1024, decode_unicode=False):
             if not raw_line:
                 continue
             line = raw_line.strip()
             if not line.startswith(b"data:"):
                 continue
+
             data_bytes = line[len(b"data:"):].strip()
             if data_bytes == b"[DONE]":
                 break
+
             try:
                 obj = json.loads(data_bytes.decode("utf-8"))
             except Exception:
                 result_chunks.append(data_bytes.decode("utf-8", errors="ignore"))
                 continue
+
             choices = obj.get("choices") or []
             for ch in choices:
                 delta = ch.get("delta") or {}
@@ -113,15 +125,14 @@ def call_chat_completion_stream(prompt: str, model: str = "azure-gpt-4o") -> str
                     chunk = msg.get("content")
                 if chunk:
                     result_chunks.append(chunk)
+
     return "".join(result_chunks).strip()
 
 def _extract_json_from_text(text: str) -> str:
     s = text.strip()
-    # 支持 ```json ... ``` 代码块
     fence = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", s, flags=re.IGNORECASE)
     if fence:
         return fence.group(1).strip()
-    # 简单括号匹配寻找首个完整 JSON 对象
     start = s.find("{")
     if start != -1:
         depth = 0
@@ -132,10 +143,11 @@ def _extract_json_from_text(text: str) -> str:
             elif c == "}":
                 depth -= 1
                 if depth == 0:
-                    return s[start:i+1].strip()
+                    candidate = s[start:i+1]
+                    return candidate.strip()
     return s
 
-# ============ 相关性判定 ============
+# ================= 相关性判定（推送门禁） =================
 def build_related_gate_prompt(title: str, content: str, ocr: str) -> str:
     title = title or ""
     content = content or ""
@@ -161,14 +173,15 @@ def parse_related_json(text: str) -> bool:
                 related = (val == "是")
     except Exception:
         pass
+
     if related is None:
-        # 降级关键词
         all_text = raw
         li_keywords = ["理想", "理想汽车", "Li Auto", "LI Auto", "li auto", "Li", "理想L", "理想ONE", "理想L7", "理想L8", "理想L9", "理想i8", "理想i6"]
         batt_keywords = ["电池", "续航", "充电", "起火", "爆炸", "漏液", "鼓包", "内阻", "衰减", "低温", "BMS", "电量", "SOC", "容量" , "SOH"]
         has_li = any(k.lower() in all_text.lower() for k in li_keywords)
         has_batt = any(k.lower() in all_text.lower() for k in batt_keywords)
         related = bool(has_li and has_batt)
+
     return related
 
 def check_related(data: dict) -> bool:
@@ -181,8 +194,10 @@ def check_related(data: dict) -> bool:
         content = json.dumps(content, ensure_ascii=False)
     if isinstance(ocr, (dict, list)):
         ocr = json.dumps(ocr, ensure_ascii=False)
+
+    prompt = build_related_gate_prompt(title, content, ocr)
     try:
-        llm_text = call_chat_completion_stream(build_related_gate_prompt(title, content, ocr), model="azure-gpt-4o")
+        llm_text = call_chat_completion_stream(prompt, model="azure-gpt-4o")
         return parse_related_json(llm_text)
     except Exception:
         all_text = f"{title}\n{content}\n{ocr}"
@@ -192,7 +207,7 @@ def check_related(data: dict) -> bool:
         has_batt = any(k.lower() in all_text.lower() for k in batt_keywords)
         return bool(has_li and has_batt)
 
-# ============ 摘要与烈度 ============
+# ================= 摘要与烈度 =================
 def build_summary_prompt(title: str, content: str, ocr: str) -> str:
     title = title or ""
     content = content or ""
@@ -220,106 +235,125 @@ def parse_summary_json(text: str):
             severity = str(obj.get("severity", "")).strip() or None
     except Exception:
         pass
+
     if summary is None:
         summary = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.IGNORECASE).strip()
+
     if severity not in ("低", "中", "高"):
         m = re.search(r"(低|中|高)", raw)
         severity = m.group(1) if m else "中"
+
     return summary, severity
 
 def generate_summary_and_severity(data: dict):
     title = data.get("work_title") or ""
     content = data.get("work_content") or ""
     ocr = data.get("ocr_content") or ""
+
     if isinstance(title, (dict, list)):
         title = json.dumps(title, ensure_ascii=False)
     if isinstance(content, (dict, list)):
         content = json.dumps(content, ensure_ascii=False)
     if isinstance(ocr, (dict, list)):
         ocr = json.dumps(ocr, ensure_ascii=False)
+
+    prompt = build_summary_prompt(title, content, ocr)
     try:
-        llm_text = call_chat_completion_stream(build_summary_prompt(title, content, ocr), model="azure-gpt-4o")
+        llm_text = call_chat_completion_stream(prompt, model="azure-gpt-4o")
     except Exception as e:
         return f"[摘要生成失败] {e}", "中"
+
     summary, severity = parse_summary_json(llm_text)
     return summary, severity
 
-# ============ TiDB 写入：告警记录表 ============
-def get_tidb_connection():
-    return pymysql.connect(
-        host=TIDB_HOST,
-        port=TIDB_PORT,
-        user=TIDB_USER,
-        password=TIDB_PASSWORD,
-        database=TIDB_DATABASE,
-        charset="utf8mb4",
-        autocommit=True,
-    )
+# ================= 推送数据落库 =================
+def _safe_int(v, default=None):
+    if v is None:
+        return default
+    try:
+        return int(v)
+    except Exception:
+        return default
 
-def upsert_notify_record(data: dict, summary_text: str, severity: str):
+def save_notify_record_to_tidb(data: dict, summary_text: str, severity: str):
     """
-    将通过门禁（需要推送）的记录写入新表：
-    dwd_idc_life_ent_soc_public_sentiment_battery_work_notify_mix_rt
-    采用 work_id 做幂等（需表上有唯一键/主键约束）。
-    """
-    cols = [
-        "work_id", "work_url", "work_title", "work_content",
-        "publish_time", "crawled_time", "account_name", "source",
-        "like_cnt", "reply_cnt", "forward_cnt", "content_senti",
-        "ocr_content", "summary", "event_level"
-    ]
-    values = [
-        data.get("work_id"),
-        data.get("work_url"),
-        data.get("work_title"),
-        data.get("work_content"),
-        data.get("publish_time"),
-        data.get("crawled_time"),
-        data.get("account_name"),
-        data.get("source"),
-        data.get("like_cnt"),
-        data.get("reply_cnt"),
-        data.get("forward_cnt"),
-        data.get("content_senti"),
-        data.get("ocr_content"),
-        summary_text,
-        severity,
-    ]
-    placeholders = ",".join(["%s"] * len(cols))
-    update_clause = ",".join([f"{c}=VALUES({c})" for c in cols if c != "work_id"])
-    sql = f"""
-    INSERT INTO {NOTIFY_TABLE} ({",".join(cols)})
-    VALUES ({placeholders})
-    ON DUPLICATE KEY UPDATE {update_clause}
+    将即将/已经推送到飞书的数据落库到通知表（同库）。
+    使用 work_id 作为唯一键，若已存在则更新。
     """
     try:
-        conn = get_tidb_connection()
-        with conn.cursor() as cur:
-            cur.execute(sql, values)
-        conn.close()
-        print(f"✅ 已写入/更新告警记录表 {NOTIFY_TABLE}，work_id={data.get('work_id')}")
+        conn = pymysql.connect(**DB_CONFIG)
+        conn.autocommit(True)
+        with conn.cursor() as cursor:
+            sql = f"""
+            INSERT INTO {NOTIFY_TABLE} (
+                work_id, work_url, work_title, work_content,
+                publish_time, crawled_time, account_name, source,
+                like_cnt, reply_cnt, forward_cnt, content_senti,
+                ocr_content, summary, event_level
+            ) VALUES (
+                %(work_id)s, %(work_url)s, %(work_title)s, %(work_content)s,
+                %(publish_time)s, %(crawled_time)s, %(account_name)s, %(source)s,
+                %(like_cnt)s, %(reply_cnt)s, %(forward_cnt)s, %(content_senti)s,
+                %(ocr_content)s, %(summary)s, %(event_level)s
+            )
+            ON DUPLICATE KEY UPDATE
+                work_url=VALUES(work_url),
+                work_title=VALUES(work_title),
+                work_content=VALUES(work_content),
+                publish_time=VALUES(publish_time),
+                crawled_time=VALUES(crawled_time),
+                account_name=VALUES(account_name),
+                source=VALUES(source),
+                like_cnt=VALUES(like_cnt),
+                reply_cnt=VALUES(reply_cnt),
+                forward_cnt=VALUES(forward_cnt),
+                content_senti=VALUES(content_senti),
+                ocr_content=VALUES(ocr_content),
+                summary=VALUES(summary),
+                event_level=VALUES(event_level)
+            """
+            params = {
+                "work_id": data.get("work_id"),
+                "work_url": data.get("work_url"),
+                "work_title": data.get("work_title"),
+                "work_content": data.get("work_content"),
+                "publish_time": data.get("publish_time"),
+                "crawled_time": data.get("crawled_time"),
+                "account_name": data.get("account_name"),
+                "source": data.get("source"),
+                "like_cnt": _safe_int(data.get("like_cnt"), default=-99),
+                "reply_cnt": _safe_int(data.get("reply_cnt"), default=-99),
+                "forward_cnt": _safe_int(data.get("forward_cnt"), default=-99),
+                "content_senti": _safe_int(data.get("content_senti")),
+                "ocr_content": data.get("ocr_content"),
+                "summary": summary_text,
+                "event_level": severity
+            }
+            cursor.execute(sql, params)
+            print("✅ 通知数据已落库到 TiDB 通知表")
     except Exception as e:
-        print(f"❌ 写入告警记录表失败: {e}")
+        print(f"❌ 通知数据落库失败: {e}")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
-# ============ 推送主流程 ============
+# ================= 推送流程 =================
 def send_to_feishu(data: dict):
-    # 1) 门禁：是否与理想汽车电池相关；不相关则跳过（不写入新表）
+    # 门禁：先判断是否与理想汽车电池相关，不相关则跳过推送和落库
     try:
         if not check_related(data):
-            print("跳过推送：模型判定与理想汽车电池不相关（记录已新增到源表，但不入告警表）。")
-            return
+            print("跳过推送与落库：模型判定与理想汽车电池不相关（记录已新增到数据库）。")
+            return False
     except Exception as e:
-        print(f"相关性判定异常，默认跳过推送：{e}")
-        return
+        print(f"相关性判定异常，默认跳过推送与落库：{e}")
+        return False
 
-    # 2) 生成摘要与烈度
-    summary_text, severity = generate_summary_and_severity(data)
-
-    # 3) 先写入“告警记录表”（已通过门禁筛选的集合）
-    upsert_notify_record(data, summary_text, severity)
-
-    # 4) 组织飞书内容并推送（飞书展示用解码/截断，不影响入库原值）
     post_content = []
+
+    # 生成摘要与烈度（摘要不截断）
+    summary_text, severity = generate_summary_and_severity(data)
     advice = ADVICE_BY_SEVERITY.get(severity, ADVICE_BY_SEVERITY["中"])
 
     for k in ORDERED_FIELDS:
@@ -347,7 +381,6 @@ def send_to_feishu(data: dict):
             {"tag": "text", "text": f"【{label}】: {v}"}
         ])
 
-    # 末尾：@ 指定人 + 处理意见
     post_content.append([
         {"tag": "at", "user_id": FEISHU_OPEN_ID},
         {"tag": "text", "text": f" {advice}（烈度：{severity}）"}
@@ -365,13 +398,13 @@ def send_to_feishu(data: dict):
         }
     }
 
+    ok = False
     try:
         resp = requests.post(
             WEBHOOK_URL,
             headers={"Content-Type": "application/json; charset=utf-8"},
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8")
         )
-        ok = False
         if resp.status_code == 200:
             try:
                 j = resp.json()
@@ -386,7 +419,16 @@ def send_to_feishu(data: dict):
     except Exception as e:
         print(f"❌ 调用飞书接口异常: {e}")
 
-# ============ 运行入口 ============
+    # 仅当需要推送（相关性为真）时进行落库；是否要求“仅在推送成功后落库”取决于业务，这里选择推送成功后落库
+    if ok:
+        try:
+            save_notify_record_to_tidb(data, summary_text, severity)
+        except Exception as e:
+            print(f"❌ 推送后落库异常: {e}")
+
+    return ok
+
+# ================= 运行入口 =================
 if __name__ == "__main__":
     if len(sys.argv) >= 2:
         try:
@@ -397,16 +439,18 @@ if __name__ == "__main__":
             print(f"❌ 解析输入 JSON 失败: {e}")
             sys.exit(1)
     else:
-        # 可选：本地测试数据
+        # 示例测试数据（仅独立运行时使用）
         test_data = {
             "id": 186,
             "work_id": "315bd20e7e7690e27f2859689ac4ba04",
             "work_url": "www.baidu.com",
             "work_title": "电池爆炸，死伤10余人（理想L9疑似事故）",
             "work_content": "据现场消息，疑似理想L9发生电池爆炸导致人员伤亡，具体原因调查中",
-            "publish_time": "2025-10-20 10:00:00",
-            "crawled_time": "2025-10-20 10:05:00",
-            "account_name": base64.b64encode(base64.b64encode("测试账号".encode("utf-8"))).decode("utf-8"),
+            "publish_time": datetime.datetime.now(),
+            "crawled_time": datetime.datetime.now(),
+            "account_name": base64.b64encode(
+                base64.b64encode("测试账号".encode("utf-8"))
+            ).decode("utf-8"),
             "source": "微博",
             "like_cnt": 99,
             "reply_cnt": 12,
@@ -414,5 +458,5 @@ if __name__ == "__main__":
             "content_senti": 0,
             "ocr_content": "报道称理想汽车某车型电池故障引发起火爆炸，现场有伤亡"
         }
-        print("未检测到输入参数，使用示例数据进行测试推送...")
+        print("未检测到输入参数，使用示例数据进行测试推送并落库...")
         send_to_feishu(test_data)
