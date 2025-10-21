@@ -151,7 +151,7 @@ def _extract_json_from_text(text: str) -> str:
 def contains_li_brand(text: str) -> bool:
     """
     严格匹配理想汽车品牌或车型：
-    理想汽车/Li Auto；理想ONE；理想L6/L7/L8/L9；理想i6/i8；理想MEGA/Mega
+    理想汽车/Li Auto；理想ONE；理想L6/L7/L8/L9；理想i6/i8；理想Mega/MEGA
     """
     if not text:
         return False
@@ -159,12 +159,12 @@ def contains_li_brand(text: str) -> bool:
     patterns = [
         r"理想汽车",
         r"\bli\s*auto\b",            # Li Auto
-        r"理想\s*one",               # 理想ONE
-        r"理想\s*l6", r"理想\s*l7", r"理想\s*l8", r"理想\s*l9",  # 理想L6-L9
+        r"理想\s*one", r"理想one",
+        r"理想\s*l6", r"理想\s*l7", r"理想\s*l8", r"理想\s*l9",
         r"理想l6", r"理想l7", r"理想l8", r"理想l9",
-        r"理想\s*i6", r"理想\s*i8",   # 理想i6/i8
+        r"理想\s*i6", r"理想\s*i8",
         r"理想i6", r"理想i8",
-        r"理想\s*mega", r"理想\s*MEGA",  # 理想Mega/MEGA
+        r"理想\s*mega", r"理想\s*MEGA",
         r"理想mega", r"理想MEGA",
     ]
     return any(re.search(pat, s, flags=re.IGNORECASE) for pat in patterns)
@@ -192,7 +192,6 @@ def contains_competitor_brand(text: str) -> bool:
         "零跑", "leapmotor",
         "广汽埃安", "埃安", "aion", "gac",
         "吉利", "geely",
-        "理想以外品牌",  # 占位提示，无实际作用
         # 传统国际品牌
         "宝马", "bmw",
         "奔驰", "mercedes", "benz",
@@ -223,17 +222,31 @@ def contains_battery_topic(text: str) -> bool:
     ]
     return any(k in s for k in batt_keywords)
 
+def contains_range_extender_topic(text: str) -> bool:
+    """
+    增程器相关主题词：增程器/增程系统/增程/增程发动机/范围扩展器/RE（Range Extender）等
+    """
+    if not text:
+        return False
+    s = str(text).lower()
+    re_keywords = [
+        "增程器", "增程系统", "增程", "增程发动机", "范围扩展器",
+        "range extender", "range-extender", "增程模式", "增程机",
+        "发电机", "发动机增程", "erev", "增程版"
+    ]
+    return any(k in s for k in re_keywords)
+
 # ================= 相关性判定（推送门禁） =================
 def build_related_gate_prompt(title: str, content: str, ocr: str) -> str:
     """
-    与理想汽车电池相关性的门禁判定提示词（更严格版）。
+    与理想汽车电池/增程器相关性的门禁判定提示词（更严格版）。
     仅返回纯 JSON：{"related":"是"} 或 {"related":"否"}。
 
     严格判定规则（必须同时满足）：
     1) 文本中明确出现理想汽车品牌或车型之一：
-       理想汽车 / Li Auto / 理想ONE / 理想L6 / 理想L7 / 理想L8 / 理想L9 / 理想i6 / 理想i8 / 理想MEGA/Mega。
+       理想汽车 / Li Auto / 理想ONE / 理想L6 / 理想L7 / 理想L8 / 理想L9 / 理想i6 / 理想i8 / 理想Mega/MEGA。
        注意：出现“理想”一词但非品牌语境（如“理想生活”“理想状态”）不算品牌指向。
-    2) 话题聚焦电池相关议题（电池、续航、充电、慢充、快充、换电、安全、起火、爆炸、故障、低温、高压、BMS、SOC、SOH、容量、能量回收等）。
+    2) 话题聚焦电池或增程器相关议题（电池、续航、充电、慢充、快充、换电、安全、起火、爆炸、故障、低温、高压、BMS、SOC、SOH、容量、能量回收、增程器/增程系统/增程发动机等）。
     3) 若只出现友商品牌（如特斯拉、比亚迪、蔚来、小鹏、极氪、问界、智己、岚图、腾势、深蓝、哪吒、零跑、埃安、吉利、宝马、奔驰、奥迪、大众等）
        而没有出现理想品牌或车型，则判定为“不相关”。
 
@@ -244,8 +257,8 @@ def build_related_gate_prompt(title: str, content: str, ocr: str) -> str:
     content = content or ""
     ocr = ocr or ""
     return (
-        "请严格判断以下文本是否与“理想汽车”的电池相关（避免把友商电池话题误判为理想）。"
-        "必须满足：出现理想汽车品牌/车型（理想汽车/Li Auto/理想ONE/理想L6/L7/L8/L9/理想i6/i8/理想MEGA），且话题集中在电池相关议题。"
+        "请严格判断以下文本是否与“理想汽车”的电池或增程器相关（避免把友商话题误判为理想）。"
+        "必须满足：出现理想汽车品牌/车型（理想汽车/Li Auto/理想ONE/理想L6/L7/L8/L9/理想i6/i8/理想Mega），且话题集中在电池或增程器相关议题。"
         "若仅出现友商品牌（如特斯拉、比亚迪、蔚来、小鹏、极氪、问界、智己、岚图、腾势、深蓝、哪吒、零跑、埃安、吉利、宝马、奔驰、奥迪、大众等）而未出现理想品牌或车型，则判定为“不相关”。"
         "只返回纯 JSON，不要任何额外文字："
         '{"related": "是"} 或 {"related": "否"}'
@@ -267,18 +280,18 @@ def parse_related_json(text: str) -> bool:
         pass
 
     if related is None:
-        # 回退规则：品牌 + 电池话题同时出现
+        # 回退规则：品牌 + （电池或增程器）主题同时出现
         has_li = contains_li_brand(raw)
-        has_batt = contains_battery_topic(raw)
+        has_batt = contains_battery_topic(raw) or contains_range_extender_topic(raw)
         related = bool(has_li and has_batt)
 
     return related
 
 def check_related(data: dict) -> bool:
     """
-    使用大模型进行门禁判定：是否与理想汽车电池相关。
+    使用大模型进行门禁判定：是否与理想汽车电池或增程器相关。
     更严格兜底：若文本出现友商品牌且未出现理想品牌/车型，则强制判定为不相关。
-    同时要求必然出现电池相关话题。
+    同时要求必然出现电池或增程器相关话题。
     """
     title = data.get("work_title") or ""
     content = data.get("work_content") or ""
@@ -301,9 +314,9 @@ def check_related(data: dict) -> bool:
     except Exception:
         related_by_llm = None
 
-    # 必须条件：理想品牌/车型 + 电池话题
+    # 必须条件：理想品牌/车型 + （电池或增程器）话题
     has_li_brand = contains_li_brand(raw_text)
-    has_batt = contains_battery_topic(raw_text)
+    has_topic = contains_battery_topic(raw_text) or contains_range_extender_topic(raw_text)
     has_competitor = contains_competitor_brand(raw_text)
 
     # 如果模型说“是”，但出现友商且没有理想品牌/车型，则纠正为否
@@ -312,50 +325,72 @@ def check_related(data: dict) -> bool:
 
     # 模型不可用时，用规则判定
     if related_by_llm is None:
-        return bool(has_li_brand and has_batt)
+        return bool(has_li_brand and has_topic)
 
     # 模型结果为 True 也要满足硬性条件
-    return bool(related_by_llm and has_li_brand and has_batt)
+    return bool(related_by_llm and has_li_brand and has_topic)
 
-# ================= 摘要与烈度 =================
+# ================= 摘要与烈度（含主体聚焦判定） =================
 def build_summary_prompt(title: str, content: str, ocr: str) -> str:
+    """
+    生成摘要、烈度，并额外判断“摘要的主体是否聚焦理想汽车的电池或增程器”。
+    返回纯 JSON：
+    {"summary": "...", "severity": "低|中|高", "focus": "是|否"}
+    """
     title = title or ""
     content = content or ""
     ocr = ocr or ""
     return (
         "你是企业舆情分析助手。请阅读主贴标题、正文、OCR识别内容。"
         "请完成："
-        "1) 用中文输出约50字的一段事件摘要（不包含是否与理想汽车电池相关的判断）；"
+        "1) 用中文输出约50字的一段事件摘要（不包含判断语气）；"
         "2) 单独给出事件烈度，仅可为：低/中/高；"
-        "严格返回纯 JSON 文本，不要任何额外文字，不要使用代码块或反引号："
-        '{"summary": "<事件摘要>", "severity": "<低|中|高>"}'
+        "3) 判断该摘要的主体是否聚焦“理想汽车（理想汽车/Li Auto/理想ONE/L6/L7/L8/L9/i6/i8/Mega）”的电池或增程器（增程系统/增程发动机），是或否。"
+        "严格返回纯 JSON 文本，不要任何额外文字、不要代码块或反引号："
+        '{"summary": "<事件摘要>", "severity": "<低|中|高>", "focus": "<是|否>"}'
         f"\n标题：{title}\n正文：{content}\nOCR：{ocr}\n"
         "只返回上述 JSON。"
     )
 
 def parse_summary_json(text: str):
+    """
+    解析 {"summary": "...", "severity": "低|中|高", "focus": "是|否"}
+    若 JSON 不规范，降级：从全文提取摘要；烈度默认中；focus 通过摘要和原文关键词规则估计。
+    """
     raw = text.strip()
     json_str = _extract_json_from_text(raw)
     summary = None
     severity = None
+    focus = None
     try:
         obj = json.loads(json_str)
         if isinstance(obj, dict):
             summary = str(obj.get("summary", "")).strip() or None
             severity = str(obj.get("severity", "")).strip() or None
+            # 同时兼容不同键名
+            focus_val = obj.get("focus") or obj.get("focus_li_battery_or_range_extender")
+            if focus_val is not None:
+                focus = str(focus_val).strip()
     except Exception:
         pass
 
     if summary is None:
         summary = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.IGNORECASE).strip()
-
     if severity not in ("低", "中", "高"):
         m = re.search(r"(低|中|高)", raw)
         severity = m.group(1) if m else "中"
+    if focus not in ("是", "否"):
+        # 通过摘要文本估计主体是否聚焦：理想品牌 + （电池或增程器）同时出现
+        has_li = contains_li_brand(summary)
+        has_topic = contains_battery_topic(summary) or contains_range_extender_topic(summary)
+        focus = "是" if (has_li and has_topic) else "否"
 
-    return summary, severity
+    return summary, severity, focus
 
 def generate_summary_and_severity(data: dict):
+    """
+    基于主贴标题、正文内容和 OCR 内容生成摘要与烈度，并返回主体聚焦判定（focus）。
+    """
     title = data.get("work_title") or ""
     content = data.get("work_content") or ""
     ocr = data.get("ocr_content") or ""
@@ -368,10 +403,11 @@ def generate_summary_and_severity(data: dict):
     try:
         llm_text = call_chat_completion_stream(prompt, model="azure-gpt-4o")
     except Exception as e:
-        return f"[摘要生成失败] {e}", "中"
+        # 降级：摘要失败时给出错误提示，烈度默认中，focus 默认否（防误推）
+        return f"[摘要生成失败] {e}", "中", "否"
 
-    summary, severity = parse_summary_json(llm_text)
-    return summary, severity
+    summary, severity, focus = parse_summary_json(llm_text)
+    return summary, severity, focus
 
 # ================= 推送数据落库 =================
 def _safe_int(v, default=None):
@@ -448,10 +484,10 @@ def save_notify_record_to_tidb(data: dict, summary_text: str, severity: str):
 
 # ================= 推送流程 =================
 def send_to_feishu(data: dict):
-    # 门禁：先判断是否与理想汽车电池相关，不相关则跳过推送和落库
+    # 门禁：先判断是否与理想汽车电池/增程器相关，不相关则跳过推送和落库
     try:
         if not check_related(data):
-            print("跳过推送与落库：模型判定与理想汽车电池不相关（记录已新增到数据库）。")
+            print("跳过推送与落库：模型判定与理想汽车电池/增程器不相关（记录已新增到数据库）。")
             return False
     except Exception as e:
         print(f"相关性判定异常，默认跳过推送与落库：{e}")
@@ -459,8 +495,14 @@ def send_to_feishu(data: dict):
 
     post_content = []
 
-    # 生成摘要与烈度（摘要不截断）
-    summary_text, severity = generate_summary_and_severity(data)
+    # 生成摘要与烈度，并获取主体聚焦判定
+    summary_text, severity, focus = generate_summary_and_severity(data)
+
+    # 新增主体聚焦门禁：若摘要主体不是理想汽车的电池或增程器，则不推送、不落库
+    if focus != "是":
+        print("跳过推送与落库：摘要主体不聚焦理想汽车的电池或增程器。")
+        return False
+
     advice = ADVICE_BY_SEVERITY.get(severity, ADVICE_BY_SEVERITY["中"])
 
     for k in ORDERED_FIELDS:
