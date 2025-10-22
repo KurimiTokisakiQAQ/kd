@@ -52,8 +52,8 @@ FIELD_MAP = {
 ORDERED_FIELDS = [
     "source", "work_url", "publish_time", "account_name",
     "summary",
-    "work_title", "work_content",
-    "like_cnt", "reply_cnt", "forward_cnt"
+    # "work_title", "work_content",
+    # "like_cnt", "reply_cnt", "forward_cnt"
 ]
 ADVICE_BY_SEVERITY = {"低": "请相关人员了解", "中": "请相关人员关注", "高": "请相关人员重点关注"}
 
@@ -130,7 +130,7 @@ def build_evaluation_prompt(title: str, content: str, ocr: str) -> str:
     由模型同时判断：
     - focus: 主体是否严格聚焦“理想汽车（Li Auto/理想ONE/L6/L7/L8/L9/i6/i8/Mega）的电池或增程器（增程系统/增程发动机）的问题”；
     - problem: 是否明确指出上述主体存在“不足/缺陷/风险/故障/事故/投诉/维权/召回”等问题（对比/评测类内容除非明确指出理想电池或增程器有问题，否则为否）；
-    - summary: 约50字中文摘要；
+    - summary: 约100字以内的中文摘要；
     - severity: 低/中/高。
     只返回纯JSON，不得包含其他文字或代码块。
     """
@@ -305,7 +305,7 @@ def send_to_feishu(data: dict):
     payload = {
         "msg_type": "post",
         "content": {
-            "post": {"zh_cn": {"title": "📢 问题舆情告警（理想电池/增程器）", "content": post_content}}
+            "post": {"zh_cn": {"title": "📢 f负面舆情告警（理想电池/增程器）", "content": post_content}}
         }
     }
 
