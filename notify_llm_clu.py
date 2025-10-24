@@ -47,6 +47,7 @@ FIELD_MAP = {
 ORDERED_FIELDS = ["source", "work_url", "publish_time", "account_name", "summary"]
 ADVICE_BY_SEVERITY = {"低": "请相关人员了解", "中": "请相关人员关注", "高": "请相关人员重点关注"}
 
+# ===================== 公共工具 =====================
 def double_base64_decode(s: str) -> str:
     try:
         return base64.b64decode(base64.b64decode(s)).decode("utf-8")
@@ -86,6 +87,28 @@ def to_datetime(v):
             pass
     return datetime.datetime.now()
 
+def _safe_int(v, default=None):
+    if v is None:
+        return default
+    try:
+        return int(v)
+    except Exception:
+        return default
+
+def safe_bigint(v):
+    if v is None:
+        return None
+    try:
+        if isinstance(v, (int, float)):
+            return int(v)
+        if isinstance(v, str):
+            s = v.strip()
+            return int(s) if re.fullmatch(r"[+-]?\d+", s) else None
+    except Exception:
+        return None
+    return None
+
+# ===================== 大模型评估 =====================
 def call_chat_completion_stream(prompt: str, model: str = "azure-gpt-4o") -> str:
     payload = {"model": model, "messages": [{"role": "user", "content": prompt}], "stream": True}
     result_chunks = []
@@ -178,7 +201,7 @@ def evaluate_post(data: dict):
         return "否", "否", f"[评估失败] {e}", "中"
     return parse_evaluation_json(llm_text)
 
-# ============== 相似聚类（优先主贴标题+正文，否则 OCR） ==============
+# ===================== 相似聚类（优先主贴标题+正文，否则 OCR） =====================
 def clean_text(s: str) -> str:
     if not s:
         return ""
@@ -220,6 +243,17 @@ def _stable_hash_id(title: str, content: str, ocr: str) -> str:
         base = str(datetime.datetime.now().timestamp())
     return hashlib.md5(base.encode("utf-8")).hexdigest()[:16]
 
+def ensure_similar_id(data, computed_similar_id: str) -> str:
+    if computed_similar_id:
+        return str(computed_similar_id)
+    wid = data.get("work_id")
+    if wid:
+        return str(wid)
+    rid = safe_bigint(data.get("id"))
+    if rid is not None:
+        return str(rid)
+    return _stable_hash_id(data.get("work_title"), data.get("work_content"), data.get("ocr_content"))
+
 def find_similar_id(conn, data: dict, lookback_days: int = 30, threshold: float = 0.72) -> str:
     new_text, _ = choose_text_for_similarity(data.get("work_title"), data.get("work_content"), data.get("ocr_content"))
     pub_dt = to_datetime(data.get("publish_time"))
@@ -242,22 +276,16 @@ def find_similar_id(conn, data: dict, lookback_days: int = 30, threshold: float 
                 sim = text_similarity(new_text, cand_text)
                 if sim > best_sim:
                     best_sim = sim
-                    # 候选 similar_id 为空时，回退用候选的 work_id 或 id
                     cand_sim_id = r.get("similar_id") or r.get("work_id") or r.get("id")
                     best_similar_id = str(cand_sim_id) if cand_sim_id is not None else None
     except Exception as e:
         print(f"⚠️ 查找相似类簇异常：{e}")
 
     if best_sim >= threshold and best_similar_id:
-        return best_similar_id
+        return str(best_similar_id)
+    return ensure_similar_id(data, None)
 
-    # 强兜底：优先当前 work_id -> 当前 id -> 内容哈希
-    wid = data.get("work_id"); rid = data.get("id")
-    if wid: return str(wid)
-    if rid: return str(rid)
-    return _stable_hash_id(data.get("work_title"), data.get("work_content"), data.get("ocr_content"))
-
-# ============== 统计相似数量（七日/单日） ==============
+# ===================== 统计相似数量（七日/单日） =====================
 def compute_similar_counts(conn, similar_id: str, publish_time: datetime.datetime):
     pub_dt = to_datetime(publish_time)
     day_str = pub_dt.strftime("%Y-%m-%d")
@@ -276,27 +304,23 @@ def compute_similar_counts(conn, similar_id: str, publish_time: datetime.datetim
         print(f"⚠️ 统计相似主贴数量异常: {e}")
     return int(seven_cnt), int(day_cnt)
 
-# ============== 落库（含 id 与 similar_id） ==============
-def _safe_int(v, default=None):
-    if v is None:
-        return default
-    try:
-        return int(v)
-    except Exception:
-        return default
-
+# ===================== 落库（含 id 与 similar_id） =====================
 def upsert_notify_and_counts(data: dict, summary_text: str, severity: str):
     conn = None
     try:
         conn = pymysql.connect(**DB_CONFIG)
         conn.autocommit(True)
 
-        similar_id = find_similar_id(conn, data)
+        computed_sim_id = find_similar_id(conn, data)
+        similar_id = ensure_similar_id(data, computed_sim_id)
+        row_id = safe_bigint(data.get("id"))
+
+        print(f"[DEBUG] parsed id={row_id} (type={type(row_id).__name__}), work_id={data.get('work_id')}, similar_id={similar_id}")
 
         with conn.cursor() as cursor:
             sql = f"""
             INSERT INTO {NOTIFY_TABLE} (
-                id,                 -- 源表自增ID，直接沿用
+                id,
                 work_id, work_url, work_title, work_content,
                 publish_time, crawled_time, account_name, source,
                 like_cnt, reply_cnt, forward_cnt, content_senti,
@@ -326,7 +350,7 @@ def upsert_notify_and_counts(data: dict, summary_text: str, severity: str):
                 similar_id=VALUES(similar_id)
             """
             params = {
-                "id": data.get("id"),  # 关键：沿用源表 id
+                "id": row_id,
                 "work_id": data.get("work_id"),
                 "work_url": data.get("work_url"),
                 "work_title": data.get("work_title"),
@@ -342,7 +366,7 @@ def upsert_notify_and_counts(data: dict, summary_text: str, severity: str):
                 "ocr_content": data.get("ocr_content"),
                 "summary": summary_text,
                 "event_level": severity,
-                "similar_id": similar_id  # 保证非空
+                "similar_id": similar_id
             }
             cursor.execute(sql, params)
             print("✅ 通知数据已落库到 TiDB 通知表（含 id 与 similar_id）")
@@ -359,7 +383,7 @@ def upsert_notify_and_counts(data: dict, summary_text: str, severity: str):
         except Exception:
             pass
 
-# ============== 推送 ==============
+# ===================== 推送 =====================
 def send_to_feishu(data: dict):
     focus, problem, summary_text, severity = evaluate_post(data)
     if focus != "是":
@@ -418,6 +442,7 @@ def send_to_feishu(data: dict):
         print(f"❌ 调用飞书接口异常: {e}")
     return ok
 
+# ===================== 入口 =====================
 if __name__ == "__main__":
     if len(sys.argv) >= 2:
         try:
