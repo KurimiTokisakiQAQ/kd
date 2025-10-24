@@ -38,7 +38,7 @@ try:
 
                 # 调用 notify_llm.py：完成相关性判定、摘要与烈度生成、飞书推送，并落库到通知表
                 try:
-                    subprocess.run(["python3", "notify_llm.py", row_json_str])
+                    subprocess.run(["python3", "notify_llm_clu.py", row_json_str])
                 except Exception as e:
                     print(f"❌ 调用飞书通知脚本失败: {e}")
 
