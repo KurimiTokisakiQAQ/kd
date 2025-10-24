@@ -285,20 +285,44 @@ def find_similar_id(conn, data: dict, lookback_days: int = 30, threshold: float 
         return str(best_similar_id)
     return ensure_similar_id(data, None)
 
-# ===================== 统计相似数量（七日/单日） =====================
-def compute_similar_counts(conn, similar_id: str, publish_time: datetime.datetime):
+# ===================== 统计相似数量（七日/单日，不含本条） =====================
+def compute_similar_counts(conn, similar_id: str, publish_time: datetime.datetime, exclude_id=None, exclude_work_id=None):
+    """
+    统计同簇（similar_id相同）的数量，且不计入本条记录：
+    - 七日：以该发布日为截止，向前含当天的7个自然日
+    - 单日：同一天
+    """
     pub_dt = to_datetime(publish_time)
     day_str = pub_dt.strftime("%Y-%m-%d")
     start_7_date = (pub_dt.date() - datetime.timedelta(days=6)).strftime("%Y-%m-%d")
     end_7_date = pub_dt.strftime("%Y-%m-%d")
-    day_cnt = 0; seven_cnt = 0
+
+    # 公共过滤条件
+    base_conds = ["similar_id = %s"]
+    base_params = [similar_id]
+    if exclude_id is not None:
+        base_conds.append("id <> %s")
+        base_params.append(exclude_id)
+    if exclude_work_id:
+        base_conds.append("work_id <> %s")
+        base_params.append(exclude_work_id)
+
+    day_cnt = 0
+    seven_cnt = 0
     try:
         with conn.cursor() as cursor:
-            sql_day = f"SELECT COUNT(*) AS cnt FROM {NOTIFY_TABLE} WHERE similar_id = %s AND DATE(publish_time) = %s"
-            cursor.execute(sql_day, (similar_id, day_str))
+            # 单日
+            conds_day = base_conds + ["DATE(publish_time) = %s"]
+            params_day = base_params + [day_str]
+            sql_day = f"SELECT COUNT(*) AS cnt FROM {NOTIFY_TABLE} WHERE " + " AND ".join(conds_day)
+            cursor.execute(sql_day, params_day)
             day_cnt = (cursor.fetchone() or {}).get("cnt", 0) or 0
-            sql_7 = f"SELECT COUNT(*) AS cnt FROM {NOTIFY_TABLE} WHERE similar_id = %s AND DATE(publish_time) BETWEEN %s AND %s"
-            cursor.execute(sql_7, (similar_id, start_7_date, end_7_date))
+
+            # 七日
+            conds_7 = base_conds + ["DATE(publish_time) BETWEEN %s AND %s"]
+            params_7 = base_params + [start_7_date, end_7_date]
+            sql_7 = f"SELECT COUNT(*) AS cnt FROM {NOTIFY_TABLE} WHERE " + " AND ".join(conds_7)
+            cursor.execute(sql_7, params_7)
             seven_cnt = (cursor.fetchone() or {}).get("cnt", 0) or 0
     except Exception as e:
         print(f"⚠️ 统计相似主贴数量异常: {e}")
@@ -314,8 +338,9 @@ def upsert_notify_and_counts(data: dict, summary_text: str, severity: str):
         computed_sim_id = find_similar_id(conn, data)
         similar_id = ensure_similar_id(data, computed_sim_id)
         row_id = safe_bigint(data.get("id"))
+        work_id = data.get("work_id")
 
-        print(f"[DEBUG] parsed id={row_id} (type={type(row_id).__name__}), work_id={data.get('work_id')}, similar_id={similar_id}")
+        print(f"[DEBUG] parsed id={row_id} (type={type(row_id).__name__}), work_id={work_id}, similar_id={similar_id}")
 
         with conn.cursor() as cursor:
             sql = f"""
@@ -351,7 +376,7 @@ def upsert_notify_and_counts(data: dict, summary_text: str, severity: str):
             """
             params = {
                 "id": row_id,
-                "work_id": data.get("work_id"),
+                "work_id": work_id,
                 "work_url": data.get("work_url"),
                 "work_title": data.get("work_title"),
                 "work_content": data.get("work_content"),
@@ -371,7 +396,14 @@ def upsert_notify_and_counts(data: dict, summary_text: str, severity: str):
             cursor.execute(sql, params)
             print("✅ 通知数据已落库到 TiDB 通知表（含 id 与 similar_id）")
 
-        seven_cnt, day_cnt = compute_similar_counts(conn, similar_id, params["publish_time"])
+        # 统计不计入本条
+        seven_cnt, day_cnt = compute_similar_counts(
+            conn,
+            similar_id,
+            params["publish_time"],
+            exclude_id=row_id,
+            exclude_work_id=work_id
+        )
         return True, similar_id, seven_cnt, day_cnt
     except Exception as e:
         print(f"❌ 通知数据落库或统计失败: {e}")
@@ -416,11 +448,13 @@ def send_to_feishu(data: dict):
         label = FIELD_MAP.get(k, k)
         post_content.append([{"tag": "text", "text": f"【{label}】: {v}"}])
 
-    post_content.append([{"tag": "text", "text": f"【七日内相似主贴数量】: {seven_cnt}"}])
-    post_content.append([{"tag": "text", "text": f"【单日内相似主贴数量】: {day_cnt}"}])
+    # 只输出一行相似主贴数量（不计入本条）
+    post_content.append([{"tag": "text", "text": f"【相似主贴数量】{seven_cnt}条（7日）、{day_cnt}条（单日）"}])
+
+    # @ 指定人 + 建议（不展示“（烈度：x）”）
     post_content.append([
         {"tag": "at", "user_id": FEISHU_OPEN_ID},
-        {"tag": "text", "text": f" {advice}（烈度：{severity}）"}
+        {"tag": "text", "text": f" {advice}"}
     ])
 
     payload = {"msg_type": "post", "content": {"post": {"zh_cn": {"title": "📢 负面舆情告警（理想电池/增程器）", "content": post_content}}}}
@@ -456,7 +490,7 @@ if __name__ == "__main__":
         test_data = {
             "id": 186,  # 源表自增ID
             "work_id": "315bd20e7e7690e27f2859689ac4ba04",
-            "work_url": "www.baidu.com",
+            "work_url": "http://weibo.com/1633157160/Q9QMCwm18",
             "work_title": "理想L9电池低温充电失败并多次报错，用户投诉",
             "work_content": "车主称理想L9在寒潮下无法充电且频繁BMS报错，续航大幅下降，存在安全隐患，已向厂家投诉。",
             "publish_time": datetime.datetime.now(),
