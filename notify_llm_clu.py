@@ -7,15 +7,19 @@ import base64
 import sys
 import re
 import pymysql
-import difflib
 import hashlib
 
+# 飞书机器人 Webhook 与 @人列表
 WEBHOOK_URL = "https://open.feishu.cn/open-apis/bot/v2/hook/c74b9141-1759-40e2-ae3a-50cc6389e1bc"
-FEISHU_OPEN_ID = "ou_20b2bd16a8405b93019b7291ec5202c3"
+FEISHU_AT_OPEN_IDS = [
+    "ou_20b2bd16a8405b93019b7291ec5202c3"
+]
 
+# 大模型接口
 API_URL = "https://llm-cmt-api.dev.fc.chj.cloud/agentops/chat/completions"
-HEADERS = {"Content-Type": "application/json"}
+HEADERS = {"Content-Type": "application/json"}  # 如需鉴权，在此补充 Authorization
 
+# TiDB 连接信息
 DB_CONFIG = {
     "host": "da-dw-tidb-10900.chj.cloud",
     "port": 3306,
@@ -26,8 +30,10 @@ DB_CONFIG = {
     "cursorclass": pymysql.cursors.DictCursor
 }
 
+# 通知表
 NOTIFY_TABLE = "dwd_idc_life_ent_soc_public_sentiment_battery_work_notify_mix_rt"
 
+# 展示字段
 FIELD_MAP = {
     "summary":      "文章摘要",
     "work_id":      "主贴ID",
@@ -46,6 +52,9 @@ FIELD_MAP = {
 }
 ORDERED_FIELDS = ["source", "work_url", "publish_time", "account_name", "summary"]
 ADVICE_BY_SEVERITY = {"低": "请相关人员了解", "中": "请相关人员关注", "高": "请相关人员重点关注"}
+
+# 候选摘要数量上限，避免提示词过长
+MAX_SUMMARY_CANDIDATES = 200
 
 # ===================== 公共工具 =====================
 def double_base64_decode(s: str) -> str:
@@ -108,7 +117,7 @@ def safe_bigint(v):
         return None
     return None
 
-# ===================== 大模型评估 =====================
+# ===================== 大模型通用调用与解析 =====================
 def call_chat_completion_stream(prompt: str, model: str = "azure-gpt-4o") -> str:
     payload = {"model": model, "messages": [{"role": "user", "content": prompt}], "stream": True}
     result_chunks = []
@@ -155,6 +164,7 @@ def _extract_json_from_text(text: str) -> str:
                     return s[start:i+1].strip()
     return s
 
+# ===================== 推送准入：统一评估 =====================
 def build_evaluation_prompt(title: str, content: str, ocr: str) -> str:
     title = title or ""
     content = content or ""
@@ -201,49 +211,134 @@ def evaluate_post(data: dict):
         return "否", "否", f"[评估失败] {e}", "中"
     return parse_evaluation_json(llm_text)
 
-# ===================== 相似聚类（优先主贴标题+正文，否则 OCR） =====================
-def clean_text(s: str) -> str:
+# ===================== 基于摘要的 LLM 聚合 =====================
+def get_summary_candidates(conn, max_candidates: int = MAX_SUMMARY_CANDIDATES):
+    """
+    从通知表取已有记录的摘要作为候选（按时间倒序），限制数量避免提示词过长。
+    返回列表元素：{"similar_id": str, "summary": str}
+    """
+    rows = []
+    try:
+        with conn.cursor() as cursor:
+            sql = f"""
+                SELECT similar_id, summary, publish_time
+                FROM {NOTIFY_TABLE}
+                WHERE summary IS NOT NULL AND summary <> ''
+                ORDER BY publish_time DESC
+                LIMIT %s
+            """
+            cursor.execute(sql, (max_candidates,))
+            fetched = cursor.fetchall() or []
+            for r in fetched:
+                sid = r.get("similar_id")
+                summ = r.get("summary")
+                if not sid or not summ:
+                    continue
+                rows.append({"similar_id": str(sid), "summary": str(summ)})
+    except Exception as e:
+        print(f"⚠️ 提取摘要候选异常: {e}")
+    return rows
+
+def _norm_summary(s: str) -> str:
     if not s:
         return ""
-    s = str(s).lower()
-    s = re.sub(r"http[s]?://\S+", " ", s)
-    s = re.sub(r"www\.\S+", " ", s)
-    s = re.sub(r"@\S+", " ", s)
-    s = re.sub(r"#\S+#", " ", s)
-    s = re.sub(r"[^\w\u4e00-\u9fff]+", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
+    s = str(s).strip()
+    # 统一空白与去表情/特殊符号的简单清洗
+    s = re.sub(r"[\uFE0F\u200B\u200C\u200D]", "", s)  # 去掉变体选择器/零宽字符
+    s = re.sub(r"\s+", " ", s)
+    return s[:800]  # 控制单条摘要长度
 
-REPOST_HINTS = ["转发","转载","转帖","repost","分享","转一下","via","原文见","链接","link"]
+def build_summary_similarity_prompt(new_summary: str, candidates: list) -> str:
+    """
+    基于“事件级”粒度的摘要相似判定提示词（含数值指标优先规则）：
+    - 优先按具体事件聚类，避免仅因“宽泛主题”（如“电池衰退反馈”）而误聚类
+    - 若出现相同且具辨识度的关键数值指标（如“电池衰退率88.3%”“检测指数741”“召回编号XXXX”），
+      在上下文一致且无明显时间/主体冲突时，可直接判为同一事件，即便不足三项高度一致
+    """
+    cand_lines = []
+    for i, c in enumerate(candidates, 1):
+        cand_lines.append(f"[{i}] similar_id={c['similar_id']}\n摘要：{_norm_summary(c['summary'])}")
+    cand_block = "\n\n".join(cand_lines) if cand_lines else "无候选摘要"
 
-def is_primary_informative(title: str, content: str) -> bool:
-    t = clean_text(title); c = clean_text(content); combo = f"{t} {c}".strip()
-    if len(combo) < 20: return False
-    if any(h in (title or "").lower() or h in (content or "").lower() for h in REPOST_HINTS):
-        if len(combo) < 40: return False
-    if not re.search(r"[\u4e00-\u9fff\w]{10,}", combo): return False
-    return True
+    return (
+        "你是一个中文舆情“事件级”聚类判定器。目标：仅在“同一具体事件”时聚为一类；"
+        "若只是“话题/主题相似”（如泛化的“电池衰退反馈”），则不要聚为一类。\n\n"
+        "事件级一致的判定标准（满足越多越可信）：\n"
+        "1) 时间要素：明确日期（至少到月日）一致，或可推断为同一时间窗口（容差不超过±3天）；\n"
+        "2) 车型/年款/版本：具体车型（如 理想L6/L7/L8/L9/Mega 等）一致；\n"
+        "3) 部件/故障点/现象：如“电池包鼓包”“BMS报错”“增程器异常”“下摆臂异响”等一致；\n"
+        "4) 机构/主体/地点：检测机构/门店/维权组织/政府部门/媒体名/具体城市或门店一致；\n"
+        "5) 证据或来源：如“官方通告/检测报告/召回编号/工单号/媒体报道链接”等一致；\n"
+        "6) 数量/指标：同一报告或同一事故下的关键数值（受影响车辆数、指数值、比率等）一致。\n"
+        "7) 数值指标优先规则（可单独触发聚类）：如果两个摘要出现相同且具辨识度的关键数值指标，"
+        "且指标所指向的上下文一致（例如同属电池质量监测/同一检测项目），且无明显时间或主体冲突，"
+        "则可以直接判定为同一事件，即使未达到“至少三项高度一致”。\n"
+        "  - 具辨识度的指标示例：电池衰退率88.3%、检测指数741、召回编号/工单号、伤亡/受影响车辆精确数量等；\n"
+        "  - 不具辨识度或易误判的数字不应单独触发：年份（如2025年）、“Top10”这类榜单序号、常见整百整数（如100%）等；\n"
+        "  - 若出现相同数字但上下文指代不同（如不同车型/不同项目），不可据此直接聚类。\n\n"
+        "决策准则：\n"
+        "- 若满足上述要素中“至少三项高度一致”，选择相应候选；\n"
+        "- 否则，若命中“数值指标优先规则”，且上下文一致且无冲突，也可选择该候选；\n"
+        "- 若多条候选均满足，选择要素重合度最高的那一条；\n"
+        "- 否则返回 NEW。\n\n"
+        "输出严格为纯JSON：{\"choose\":\"<similar_id|NEW|索引号>\",\"reason\":\"简述\"}，不要输出其它内容。\n\n"
+        f"【新摘要】\n{_norm_summary(new_summary)}\n\n"
+        f"【候选摘要列表】\n{cand_block}\n"
+    )
 
-def choose_text_for_similarity(title: str, content: str, ocr: str) -> tuple:
-    if is_primary_informative(title, content):
-        return clean_text(title) + " " + clean_text(content), "primary"
-    ocr_clean = clean_text(ocr)
-    if len(ocr_clean) >= 10:
-        return ocr_clean, "ocr"
-    return "", "none"
+def choose_cluster_by_summary_llm(conn, new_summary: str):
+    """
+    用 LLM 基于摘要在候选中选择同类簇的 similar_id；若返回 NEW 或失败则返回 None。
+    """
+    candidates = get_summary_candidates(conn, max_candidates=MAX_SUMMARY_CANDIDATES)
+    if not candidates or not new_summary:
+        return None
 
-def text_similarity(a: str, b: str) -> float:
-    if not a or not b:
-        return 0.0
-    return difflib.SequenceMatcher(None, a, b).ratio()
+    prompt = build_summary_similarity_prompt(new_summary, candidates)
+    try:
+        llm_text = call_chat_completion_stream(prompt, model="azure-gpt-4o")
+        js = _extract_json_from_text(llm_text)
+        obj = json.loads(js)
+        choose = str(obj.get("choose") or "").strip()
+        reason = obj.get("reason")
+        if choose.upper() == "NEW":
+            print(f"[LLM聚类] 未命中候选（NEW）。理由：{reason}")
+            return None
+        # 如果返回的是索引号，映射到 similar_id
+        if re.fullmatch(r"\d+", choose):
+            idx = int(choose)
+            candidates_len = len(candidates)
+            if 1 <= idx <= candidates_len:
+                sid = candidates[idx - 1]["similar_id"]
+                print(f"[LLM聚类] 命中候选索引 {idx}/{candidates_len} -> similar_id={sid}。理由：{reason}")
+                return sid
+            return None
+        # 否则认为直接返回了 similar_id
+        for c in candidates:
+            if choose == c["similar_id"]:
+                print(f"[LLM聚类] 直接命中 similar_id={choose}。理由：{reason}")
+                return choose
+        # 返回了未知 ID，视为未命中
+        print(f"[LLM聚类] 返回的 choose={choose} 未匹配任何候选 similar_id。理由：{reason}")
+        return None
+    except Exception as e:
+        print(f"⚠️ LLM摘要聚类评估失败：{e}")
+        return None
 
 def _stable_hash_id(title: str, content: str, ocr: str) -> str:
-    base = (clean_text(title) + "|" + clean_text(content) + "|" + clean_text(ocr)).strip()
+    base = (str(title or "") + "|" + str(content or "") + "|" + str(ocr or "")).strip()
     if not base:
         base = str(datetime.datetime.now().timestamp())
     return hashlib.md5(base.encode("utf-8")).hexdigest()[:16]
 
 def ensure_similar_id(data, computed_similar_id: str) -> str:
+    """
+    保证类似簇ID非空：
+    - 优先 LLM 选中的 existing similar_id（对应首次出现的 work_id，不变）
+    - 其次本条 work_id
+    - 再次源表 id
+    - 最后内容哈希兜底
+    """
     if computed_similar_id:
         return str(computed_similar_id)
     wid = data.get("work_id")
@@ -254,50 +349,21 @@ def ensure_similar_id(data, computed_similar_id: str) -> str:
         return str(rid)
     return _stable_hash_id(data.get("work_title"), data.get("work_content"), data.get("ocr_content"))
 
-def find_similar_id(conn, data: dict, lookback_days: int = 30, threshold: float = 0.72) -> str:
-    new_text, _ = choose_text_for_similarity(data.get("work_title"), data.get("work_content"), data.get("ocr_content"))
-    pub_dt = to_datetime(data.get("publish_time"))
-    start_dt = pub_dt - datetime.timedelta(days=lookback_days)
-
-    best_sim = 0.0
-    best_similar_id = None
-
-    try:
-        with conn.cursor() as cursor:
-            sql = f"""
-                SELECT id, work_id, similar_id, work_title, work_content, ocr_content
-                FROM {NOTIFY_TABLE}
-                WHERE publish_time >= %s
-            """
-            cursor.execute(sql, (start_dt,))
-            rows = cursor.fetchall() or []
-            for r in rows:
-                cand_text, _ = choose_text_for_similarity(r.get("work_title"), r.get("work_content"), r.get("ocr_content"))
-                sim = text_similarity(new_text, cand_text)
-                if sim > best_sim:
-                    best_sim = sim
-                    cand_sim_id = r.get("similar_id") or r.get("work_id") or r.get("id")
-                    best_similar_id = str(cand_sim_id) if cand_sim_id is not None else None
-    except Exception as e:
-        print(f"⚠️ 查找相似类簇异常：{e}")
-
-    if best_sim >= threshold and best_similar_id:
-        return str(best_similar_id)
-    return ensure_similar_id(data, None)
+def find_similar_id(conn, data: dict, summary_text: str) -> str:
+    """
+    基于摘要的 LLM 聚合：用新记录的摘要与 notify 表内摘要比较，选择同类簇的 similar_id；
+    未命中则按既定逻辑兜底。
+    """
+    chosen = choose_cluster_by_summary_llm(conn, summary_text)
+    return ensure_similar_id(data, chosen)
 
 # ===================== 统计相似数量（七日/单日，不含本条） =====================
 def compute_similar_counts(conn, similar_id: str, publish_time: datetime.datetime, exclude_id=None, exclude_work_id=None):
-    """
-    统计同簇（similar_id相同）的数量，且不计入本条记录：
-    - 七日：以该发布日为截止，向前含当天的7个自然日
-    - 单日：同一天
-    """
     pub_dt = to_datetime(publish_time)
     day_str = pub_dt.strftime("%Y-%m-%d")
     start_7_date = (pub_dt.date() - datetime.timedelta(days=6)).strftime("%Y-%m-%d")
     end_7_date = pub_dt.strftime("%Y-%m-%d")
 
-    # 公共过滤条件
     base_conds = ["similar_id = %s"]
     base_params = [similar_id]
     if exclude_id is not None:
@@ -335,8 +401,7 @@ def upsert_notify_and_counts(data: dict, summary_text: str, severity: str):
         conn = pymysql.connect(**DB_CONFIG)
         conn.autocommit(True)
 
-        computed_sim_id = find_similar_id(conn, data)
-        similar_id = ensure_similar_id(data, computed_sim_id)
+        similar_id = find_similar_id(conn, data, summary_text)
         row_id = safe_bigint(data.get("id"))
         work_id = data.get("work_id")
 
@@ -396,7 +461,7 @@ def upsert_notify_and_counts(data: dict, summary_text: str, severity: str):
             cursor.execute(sql, params)
             print("✅ 通知数据已落库到 TiDB 通知表（含 id 与 similar_id）")
 
-        # 统计不计入本条
+        # 相似数量统计（不计本条）
         seven_cnt, day_cnt = compute_similar_counts(
             conn,
             similar_id,
@@ -417,6 +482,7 @@ def upsert_notify_and_counts(data: dict, summary_text: str, severity: str):
 
 # ===================== 推送 =====================
 def send_to_feishu(data: dict):
+    # 先做统一评估（准入）
     focus, problem, summary_text, severity = evaluate_post(data)
     if focus != "是":
         print("跳过：主体未严格聚焦理想汽车的电池或增程器问题。")
@@ -448,14 +514,13 @@ def send_to_feishu(data: dict):
         label = FIELD_MAP.get(k, k)
         post_content.append([{"tag": "text", "text": f"【{label}】: {v}"}])
 
-    # 只输出一行相似主贴数量（不计入本条）
+    # 相似主贴数量（不计入本条）
     post_content.append([{"tag": "text", "text": f"【相似主贴数量】{seven_cnt}条（7日）、{day_cnt}条（单日）"}])
 
-    # @ 指定人 + 建议（不展示“（烈度：x）”）
-    post_content.append([
-        {"tag": "at", "user_id": FEISHU_OPEN_ID},
-        {"tag": "text", "text": f" {advice}"}
-    ])
+    # 在同一行 @ 多人 + 建议（不展示“烈度：x”）
+    mention_line = [{"tag": "at", "user_id": uid} for uid in FEISHU_AT_OPEN_IDS]
+    mention_line.append({"tag": "text", "text": f" {advice}"})
+    post_content.append(mention_line)
 
     payload = {"msg_type": "post", "content": {"post": {"zh_cn": {"title": "📢 负面舆情告警（理想电池/增程器）", "content": post_content}}}}
     ok = False
